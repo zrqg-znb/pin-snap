@@ -1,0 +1,328 @@
+import Cocoa
+import ScreenCaptureKit
+
+final class CaptureCoordinator {
+    var pinController: PinController?
+    var onEditorPresented: (() -> Void)?
+    var onEditorClosed: (() -> Void)?
+
+    private let captureService = ScreenCaptureService()
+    private var editorWindow: CaptureEditorWindow?
+    private var windowPicker: WindowPickerPanel?
+
+    func beginRegionCapture(on screen: NSScreen? = nil) {
+        // 用鼠标所在的屏幕，否则双屏时会在错误的那块屏上出现遮罩。
+        guard let target = screen ?? Self.screenUnderMouse() else { return }
+        requestSnapshot(screen: target, presetSelection: nil, centeredImage: false)
+    }
+
+    func beginFullScreenCapture(on screen: NSScreen? = nil) {
+        guard let target = screen ?? Self.screenUnderMouse() else { return }
+        requestSnapshot(screen: target,
+                        presetSelection: NSRect(origin: .zero, size: target.frame.size),
+                        centeredImage: false)
+    }
+
+    static func screenUnderMouse() -> NSScreen? {
+        let point = NSEvent.mouseLocation
+        return NSScreen.screens.first { NSMouseInRect(point, $0.frame, false) } ?? NSScreen.main
+    }
+
+    func chooseWindowCapture() {
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let windows = try await captureService.listCapturableWindows()
+                await MainActor.run {
+                    self.presentWindowPicker(windows: windows)
+                }
+            } catch {
+                self.showCaptureError(error)
+            }
+        }
+    }
+
+    private func requestSnapshot(screen: NSScreen, presetSelection: NSRect?, centeredImage: Bool) {
+        onEditorPresented?()
+        Task { [weak self] in
+            guard let self else { return }
+            // 等主窗口真正离开屏幕，避免把 PinSnap 自己截进图里。
+            try? await Task.sleep(nanoseconds: 180_000_000)
+            do {
+                let snapshot = try await captureService.snapshot(screen: screen)
+                NSLog("PinSnap: snapshot ok \(snapshot.pixelSize)")
+                await MainActor.run {
+                    self.presentEditor(snapshot: snapshot,
+                                       presetSelection: presetSelection,
+                                       centeredImage: centeredImage)
+                }
+            } catch {
+                NSLog("PinSnap: snapshot failed \(error)")
+                self.showCaptureError(error)
+            }
+        }
+    }
+
+    private func presentEditor(snapshot: CaptureSnapshot,
+                               presetSelection: NSRect?,
+                               centeredImage: Bool) {
+        NSApp.activate(ignoringOtherApps: true)
+        let window = CaptureEditorWindow(snapshot: snapshot,
+                                         presetSelection: presetSelection,
+                                         pinController: pinController,
+                                         centeredImage: centeredImage) { [weak self] in
+            self?.editorClosed()
+        }
+        editorWindow = window
+        window.makeKeyAndOrderFront(nil)
+        NSLog("PinSnap: editor presented screen=\(snapshot.screenFrame) window=\(window.frame) content=\(window.contentView?.frame ?? .zero) visible=\(window.isVisible) alpha=\(window.alphaValue) level=\(window.level.rawValue) behavior=\(window.collectionBehavior.rawValue) occlusion=\(window.occlusionState.rawValue) screen=\(window.screen?.localizedName ?? "nil")")
+    }
+
+    private func presentWindowPicker(windows: [SCWindow]) {
+        let picker = WindowPickerPanel(windows: windows) { [weak self] selected in
+            guard let self else { return }
+            self.windowPicker = nil
+            guard let selected else {
+                self.onEditorClosed?()
+                return
+            }
+            Task {
+                do {
+                    let image = try await self.captureService.capture(window: selected)
+                    await MainActor.run {
+                        guard let screen = NSScreen.main else { return }
+                        let scale = screen.backingScaleFactor
+                        let pointSize = image.size
+                        let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) ?? CGImageMini.placeholder
+                        let snapshot = CaptureSnapshot(image: cgImage,
+                                                       pixelSize: CGSize(width: pointSize.width * scale,
+                                                                         height: pointSize.height * scale),
+                                                       screenFrame: screen.frame,
+                                                       scale: scale)
+                        self.presentEditor(snapshot: snapshot, presetSelection: nil, centeredImage: true)
+                    }
+                } catch {
+                    self.showCaptureError(error)
+                }
+            }
+        }
+        windowPicker = picker
+        picker.presentAsModalOverlay()
+    }
+
+    private func editorClosed() {
+        editorWindow = nil
+        onEditorClosed?()
+    }
+
+    func autotestExport(to path: String) -> String {
+        guard let editorWindow, let cgImage = editorWindow.exportedCGImage() else { return "no-editor" }
+        let rep = NSBitmapImageRep(cgImage: cgImage)
+        guard let data = rep.representation(using: .png, properties: [:]) else { return "no-png" }
+        try? data.write(to: URL(fileURLWithPath: path))
+        return "pixels=\(rep.pixelsWide)x\(rep.pixelsHigh) path=\(path)"
+    }
+
+    func dismissEditor() {
+        editorWindow?.close()
+        editorWindow = nil
+    }
+
+    func autotestDumpView(to path: String) -> String {
+        guard let editorWindow else { return "no-editor" }
+        return editorWindow.dumpViewBitmap(to: path)
+    }
+
+    func autotestDumpBase(to path: String) -> String {
+        editorWindow?.dumpBaseImage(to: path) ?? "no-editor"
+    }
+
+    func beginRegionCaptureForTest(_ rect: NSRect, screenIndex: Int = 0) {
+        let screens = NSScreen.screens
+        guard screens.indices.contains(screenIndex) else { return }
+        requestSnapshot(screen: screens[screenIndex], presetSelection: rect, centeredImage: false)
+    }
+
+    func autotestSeedAnnotations() {
+        editorWindow?.seedTestAnnotations()
+    }
+
+    func autotestVerifyGeometry() -> String {
+        editorWindow?.autotestVerifyGeometry() ?? "no-editor"
+    }
+
+    func autotestCopy() -> String {
+        editorWindow?.autotestCopy() ?? "no-editor"
+    }
+
+    var hasEditor: Bool { editorWindow != nil }
+
+    func autotestPin() -> String {
+        editorWindow?.autotestPin() ?? "no-editor"
+    }
+
+    func autotestCancel() -> String {
+        editorWindow?.autotestCancel() ?? "no-editor"
+    }
+
+    var pinnedCount: Int { pinController?.pinnedCount ?? -1 }
+
+    /// 锚点用「窗口内相对位置」(0~1) 表达，避免按绝对坐标算出的锚点落在窗口之外，
+    /// 那样「锚点不动」就失去验证意义了。
+    func autotestZoom(factor: CGFloat, atRelative rx: CGFloat, _ ry: CGFloat) -> String {
+        guard let frame = pinController?.autotestLastFrame else { return "no-pin-window" }
+        let anchor = NSPoint(x: frame.minX + frame.width * rx, y: frame.minY + frame.height * ry)
+        return pinController?.autotestZoomLast(factor: factor, at: anchor) ?? "no-pin-controller"
+    }
+
+    func showCaptureError(_ error: Error) {
+        DispatchQueue.main.async {
+            let nsError = error as NSError
+            let bundleID = Bundle.main.bundleIdentifier ?? "未知"
+            let path = Bundle.main.bundlePath
+            let isScreenCaptureError = nsError.domain.contains("SCStream")
+                || nsError.domain.contains("ScreenCapture")
+                || nsError.localizedDescription.localizedCaseInsensitiveContains("permission")
+            let hint = isScreenCaptureError
+                ? "请确认系统设置中允许的是当前运行的 PinSnap：\n\(path)\n修改权限后请完全退出 PinSnap 再重新打开。"
+                : "这不是权限提示，请把下面的错误域和错误码发给我。"
+            let alert = NSAlert()
+            alert.messageText = isScreenCaptureError ? "屏幕截图被系统拒绝" : "截图失败"
+            alert.informativeText = "\(hint)\n\nBundle ID：\(bundleID)\n错误域：\(nsError.domain)\n错误码：\(nsError.code)\n详细信息：\(nsError.localizedDescription)"
+            alert.addButton(withTitle: "打开屏幕录制设置")
+            alert.addButton(withTitle: "关闭")
+            if alert.runModal() == .alertFirstButtonReturn {
+                let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!
+                NSWorkspace.shared.open(url)
+            }
+        }
+    }
+}
+
+enum CGImageMini {
+    static var placeholder: CGImage {
+        let context = CGContext(data: nil, width: 1, height: 1, bitsPerComponent: 8, bytesPerRow: 4,
+                                space: CGColorSpaceCreateDeviceRGB(),
+                                bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue)!
+        return context.makeImage()!
+    }
+}
+
+final class WindowPickerPanel: NSPanel, NSTableViewDataSource, NSTableViewDelegate {
+    private let windows: [SCWindow]
+    private let completion: (SCWindow?) -> Void
+    private let table = NSTableView()
+    private weak var previousKeyWindow: NSWindow?
+
+    init(windows: [SCWindow], completion: @escaping (SCWindow?) -> Void) {
+        self.windows = windows
+        self.completion = completion
+        super.init(contentRect: NSRect(x: 0, y: 0, width: 620, height: 440),
+                   styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        title = "选择要截取的窗口"
+        level = .floating
+        isReleasedWhenClosed = false
+        center()
+
+        let root = NSView()
+        contentView = root
+        let hint = NSTextField(wrappingLabelWithString: windows.isEmpty ? "没有发现可截图窗口。" : "双击窗口即可截取，截取后直接进入标注。")
+        hint.textColor = .secondaryLabelColor
+        hint.translatesAutoresizingMaskIntoConstraints = false
+        let scroll = NSScrollView()
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        scroll.hasVerticalScroller = true
+        scroll.borderType = .noBorder
+        let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("window"))
+        column.title = "窗口"
+        column.width = 560
+        table.addTableColumn(column)
+        table.headerView = nil
+        table.rowHeight = 34
+        table.delegate = self
+        table.dataSource = self
+        table.target = self
+        table.doubleAction = #selector(confirm(_:))
+        scroll.documentView = table
+
+        let capture = NSButton(title: "截取窗口", target: self, action: #selector(confirm(_:)))
+        capture.keyEquivalent = "\r"
+        capture.bezelStyle = .rounded
+        let cancel = NSButton(title: "取消", target: self, action: #selector(cancel(_:)))
+        cancel.bezelStyle = .rounded
+        let buttons = NSStackView(views: [NSView(), cancel, capture])
+        buttons.orientation = .horizontal
+        buttons.spacing = 10
+        buttons.translatesAutoresizingMaskIntoConstraints = false
+        buttons.arrangedSubviews[0].setContentHuggingPriority(.defaultLow, for: .horizontal)
+
+        root.addSubview(hint)
+        root.addSubview(scroll)
+        root.addSubview(buttons)
+        NSLayoutConstraint.activate([
+            hint.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 18),
+            hint.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -18),
+            hint.topAnchor.constraint(equalTo: root.topAnchor, constant: 16),
+            scroll.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 18),
+            scroll.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -18),
+            scroll.topAnchor.constraint(equalTo: hint.bottomAnchor, constant: 12),
+            scroll.bottomAnchor.constraint(equalTo: buttons.topAnchor, constant: -14),
+            buttons.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 18),
+            buttons.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -18),
+            buttons.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -16),
+            buttons.heightAnchor.constraint(equalToConstant: 30)
+        ])
+        if !windows.isEmpty {
+            table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        }
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    func presentAsModalOverlay() {
+        NSApp.activate(ignoringOtherApps: true)
+        makeKeyAndOrderFront(nil)
+        table.reloadData()
+    }
+
+    func numberOfRows(in tableView: NSTableView) -> Int { windows.count }
+
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        let identifier = NSUserInterfaceItemIdentifier("cell")
+        let cell = tableView.makeView(withIdentifier: identifier, owner: self) as? NSTableCellView ?? NSTableCellView()
+        cell.identifier = identifier
+        let title = windows[row].title?.isEmpty == false ? windows[row].title! : "未命名窗口"
+        let app = windows[row].owningApplication?.applicationName ?? "未知应用"
+        let text = "\(app)  —  \(title)"
+        if cell.textField == nil {
+            let label = NSTextField(labelWithString: text)
+            label.lineBreakMode = .byTruncatingMiddle
+            label.translatesAutoresizingMaskIntoConstraints = false
+            cell.addSubview(label)
+            cell.textField = label
+            NSLayoutConstraint.activate([
+                label.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 8),
+                label.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -8),
+                label.centerYAnchor.constraint(equalTo: cell.centerYAnchor)
+            ])
+        } else {
+            cell.textField?.stringValue = text
+        }
+        return cell
+    }
+
+    @objc private func confirm(_ sender: Any?) {
+        let row = table.selectedRow
+        guard windows.indices.contains(row) else { NSSound.beep(); return }
+        let selected = windows[row]
+        let callback = completion
+        orderOut(nil)
+        callback(selected)
+    }
+
+    @objc private func cancel(_ sender: Any?) {
+        let callback = completion
+        orderOut(nil)
+        callback(nil)
+    }
+}
