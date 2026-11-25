@@ -10,7 +10,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var mainWindowWasVisible = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApp.setActivationPolicy(.regular)
+        // 与 main.swift 保持一致：菜单栏常驻应用，不在 Dock 里占位。
+        NSApp.setActivationPolicy(.accessory)
         installActions()
         configureMainMenu()
         configureMenuBar()

@@ -14,6 +14,11 @@ BUILD_NUMBER="${2:-1}"
 rm -rf "$APP"
 mkdir -p "$MACOS" "$RESOURCES"
 
+# 图标：Resources/AppIcon.icns 由 Scripts/make-icon.swift + iconutil 生成
+if [[ -f "$ROOT/Resources/AppIcon.icns" ]]; then
+  cp "$ROOT/Resources/AppIcon.icns" "$RESOURCES/AppIcon.icns"
+fi
+
 swiftc -framework Cocoa -framework ScreenCaptureKit -framework Carbon \
   "$ROOT"/Sources/App/*.swift \
   "$ROOT"/Sources/Capture/*.swift \
@@ -31,10 +36,11 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundleDisplayName</key><string>PinSnap</string>
   <key>CFBundleName</key><string>PinSnap</string>
   <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundleShortVersionString</key><string>1.0.0</string>
   <key>CFBundleVersion</key><string>1</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
-  <key>LSUIElement</key><false/>
+  <key>LSUIElement</key><true/>
 </dict></plist>
 PLIST
 

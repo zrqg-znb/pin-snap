@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0.12" y1="0" x2="0.88" y2="1">
+      <stop offset="0" stop-color="#3D4874"/>
+      <stop offset="0.55" stop-color="#232B45"/>
+      <stop offset="1" stop-color="#131722"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0.2" y1="0.1" x2="0.8" y2="0.9">
+      <stop offset="0" stop-color="#FF9A62"/>
+      <stop offset="0.55" stop-color="#F4604B"/>
+      <stop offset="1" stop-color="#D93A34"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#FF6B4A" stop-opacity="0.5"/>
+      <stop offset="0.55" stop-color="#FF6B4A" stop-opacity="0.14"/>
+      <stop offset="1" stop-color="#FF6B4A" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="topLight" cx="0.5" cy="0.18" r="0.75">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.10"/>
+      <stop offset="0.6" stop-color="#FFFFFF" stop-opacity="0.03"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+    <clipPath id="squircle">
+      <path d="M512 64C726 64 852 84 902 134C952 184 960 300 960 512C960 724 952 840 902 890C852 940 726 960 512 960C298 960 172 940 122 890C72 840 64 724 64 512C64 300 72 184 122 134C172 84 298 64 512 64Z"/>
+    </clipPath>
+  </defs>
+
+  <!-- macOS 图标安全区：内容控制在实际画布的 ~824/1024，避免在 Dock 中比系统图标显大 -->
+  <g transform="translate(512 512) scale(0.9196) translate(-512 -512)">
+  <!-- 圆角方形底 -->
+  <path d="M512 64C726 64 852 84 902 134C952 184 960 300 960 512C960 724 952 840 902 890C852 940 726 960 512 960C298 960 172 940 122 890C72 840 64 724 64 512C64 300 72 184 122 134C172 84 298 64 512 64Z"
+        fill="url(#bg)"/>
+
+  <!-- 顶部柔光 + 内描边，模拟玻璃质感 -->
+  <g clip-path="url(#squircle)">
+    <ellipse cx="512" cy="250" rx="620" ry="420" fill="url(#topLight)"/>
+  </g>
+  <path d="M512 64C726 64 852 84 902 134C952 184 960 300 960 512C960 724 952 840 902 890C852 940 726 960 512 960C298 960 172 940 122 890C72 840 64 724 64 512C64 300 72 184 122 134C172 84 298 64 512 64Z"
+        fill="none" stroke="#FFFFFF" stroke-opacity="0.12" stroke-width="3"/>
+
+  <!-- 取景框四角 -->
+  <g stroke="#FFFFFF" stroke-width="26" stroke-linecap="round" stroke-linejoin="round"
+     fill="none" opacity="0.95">
+    <path d="M300 436 L300 300 L436 300"/>
+    <path d="M588 300 L724 300 L724 436"/>
+    <path d="M724 588 L724 724 L588 724"/>
+    <path d="M436 724 L300 724 L300 588"/>
+  </g>
+
+  <!-- 中心：光晕 + 对焦环 + 快门点 -->
+  <circle cx="512" cy="512" r="168" fill="url(#glow)"/>
+  <circle cx="512" cy="512" r="96" fill="none" stroke="#FFFFFF" stroke-width="3" opacity="0.20"/>
+  <circle cx="512" cy="512" r="56" fill="url(#accent)"/>
+  <ellipse cx="492" cy="489" rx="25" ry="16" fill="#FFFFFF" opacity="0.45"/>
+  </g>
+</svg>
