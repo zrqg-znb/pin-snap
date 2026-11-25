@@ -19,14 +19,15 @@ enum AnnotationTool: Int, CaseIterable {
         }
     }
 
+    /// 参考图里的细线图标符号；必须是有效的 SF Symbol，否则图标会是空白。
     var symbol: String {
         switch self {
-        case .rectangle: return "rectangle"
+        case .rectangle: return "square"
         case .arrow: return "arrow.up.right"
         case .number: return "1.circle"
         case .pen: return "pencil.tip"
-        case .text: return "textformat"
-        case .mosaic: return "squareshape.split.3x3"
+        case .text: return "textformat.size"
+        case .mosaic: return "checkerboard.rectangle"
         }
     }
 }
@@ -47,6 +48,7 @@ struct Annotation {
     var points: [NSPoint]
     var color: NSColor
     var lineWidth: CGFloat
+    var textFontSize: CGFloat = AnnotationRenderer.defaultTextFontSize
 
     var bounds: NSRect {
         NSRect(x: min(start.x, end.x), y: min(start.y, end.y),
@@ -94,6 +96,7 @@ enum AnnotationRenderer {
     static let mosaicBlock: CGFloat = 12
     static let penWidth: CGFloat = 3
     static let lineWidth: CGFloat = 3
+    static let defaultTextFontSize: CGFloat = 22
 
     static func draw(_ annotation: Annotation,
                      offset: NSPoint,
@@ -135,7 +138,7 @@ enum AnnotationRenderer {
         case .text(let text):
             guard !text.isEmpty else { return }
             let attributes: [NSAttributedString.Key: Any] = [
-                .font: NSFont.systemFont(ofSize: 22, weight: .semibold),
+                .font: NSFont.systemFont(ofSize: annotation.textFontSize, weight: .semibold),
                 .foregroundColor: annotation.color
             ]
             text.draw(at: NSPoint(x: annotation.start.x + offset.x, y: annotation.start.y + offset.y),
