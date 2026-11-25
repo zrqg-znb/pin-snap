@@ -9,6 +9,8 @@ final class CaptureCoordinator {
     private let captureService = ScreenCaptureService()
     private var editorWindow: CaptureEditorWindow?
     private var windowPicker: WindowPickerPanel?
+    /// 每次截图请求的代号；用户在抓图回来前取消或发起新截图时递增，让在途结果作废。
+    private var captureGeneration = 0
 
     func beginRegionCapture(on screen: NSScreen? = nil) {
         // 用鼠标所在的屏幕，否则双屏时会在错误的那块屏上出现遮罩。
@@ -43,22 +45,58 @@ final class CaptureCoordinator {
     }
 
     private func requestSnapshot(screen: NSScreen, presetSelection: NSRect?, centeredImage: Bool) {
+        captureGeneration += 1
+        let generation = captureGeneration
         onEditorPresented?()
+        // 抓图要 1s+（ScreenCaptureKit 冷启动），这段时间不能是白屏：
+        // 先挂上遮罩层立刻接管鼠标，等底图回来再原地填充。
+        // 窗口截图（centeredImage）没有可预设的整屏坐标，保持抓完再弹出。
+        if !centeredImage {
+            let scale = max(screen.backingScaleFactor, 1)
+            let placeholder = CaptureSnapshot(
+                image: CGImageMini.placeholder,
+                pixelSize: CGSize(width: screen.frame.width * scale,
+                                  height: screen.frame.height * scale),
+                screenFrame: screen.frame,
+                scale: scale
+            )
+            presentEditor(snapshot: placeholder,
+                          presetSelection: presetSelection,
+                          centeredImage: false)
+        }
         Task { [weak self] in
             guard let self else { return }
-            // 等主窗口真正离开屏幕，避免把 PinSnap 自己截进图里。
-            try? await Task.sleep(nanoseconds: 180_000_000)
+            // 等主窗口真正离开屏幕，避免把 PinSnap 自己截进图里（抓图侧另有排除自身兜底）。
+            try? await Task.sleep(nanoseconds: 120_000_000)
             do {
                 let snapshot = try await captureService.snapshot(screen: screen)
                 NSLog("PinSnap: snapshot ok \(snapshot.pixelSize)")
                 await MainActor.run {
-                    self.presentEditor(snapshot: snapshot,
-                                       presetSelection: presetSelection,
-                                       centeredImage: centeredImage)
+                    // 用户在底图回来前按了 Esc（或又发起了一次截图）：这张图作废，
+                    // 否则会凭空弹出一个已经取消掉的遮罩。
+                    guard generation == self.captureGeneration else {
+                        NSLog("PinSnap: snapshot discarded (generation \(generation) != \(self.captureGeneration))")
+                        return
+                    }
+                    if let window = self.editorWindow {
+                        window.applySnapshot(snapshot)
+                    } else if centeredImage {
+                        self.presentEditor(snapshot: snapshot,
+                                           presetSelection: presetSelection,
+                                           centeredImage: centeredImage)
+                    }
                 }
             } catch {
                 NSLog("PinSnap: snapshot failed \(error)")
-                self.showCaptureError(error)
+                await MainActor.run {
+                    // 占位遮罩已经挂出来了，失败必须收掉，否则会留下一块灰屏。
+                    if let window = self.editorWindow {
+                        window.close()
+                        self.editorWindow = nil
+                        self.onEditorClosed?()
+                    }
+                    self.showCaptureError(error)
+                }
             }
         }
     }
@@ -121,6 +159,7 @@ final class CaptureCoordinator {
     }
 
     private func editorClosed() {
+        captureGeneration += 1
         editorWindow = nil
         onEditorClosed?()
     }
@@ -146,6 +185,26 @@ final class CaptureCoordinator {
     func autotestDumpBase(to path: String) -> String {
         editorWindow?.dumpBaseImage(to: path) ?? "no-editor"
     }
+
+    func autotestDumpToolbar(to path: String) -> String {
+        editorWindow?.autotestDumpToolbar(to: path) ?? "no-editor"
+    }
+
+    func autotestDumpPalette(text: Bool, to path: String) -> String {
+        editorWindow?.autotestDumpPalette(text: text, to: path) ?? "no-editor"
+    }
+
+    func autotestDumpEditorRegion(to path: String) -> String {
+        editorWindow?.autotestDumpEditorRegion(to: path) ?? "no-editor"
+    }
+
+    func autotestSimulateDrag() -> String {
+        editorWindow?.autotestSimulateDrag() ?? "no-editor"
+    }
+
+    var autotestPhaseName: String { editorWindow?.autotestPhaseName ?? "no-editor" }
+
+    func autotestPaletteStability() -> String { editorWindow?.autotestPaletteStability() ?? "no-editor" }
 
     func beginRegionCaptureForTest(_ rect: NSRect, screenIndex: Int = 0) {
         let screens = NSScreen.screens

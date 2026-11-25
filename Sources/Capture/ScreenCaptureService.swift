@@ -6,7 +6,13 @@ final class ScreenCaptureService {
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
         guard let display = display(for: screen, in: content) else { throw CaptureError.noDisplay }
         let scale = screen.backingScaleFactor
-        let filter = SCContentFilter(display: display, excludingWindows: [])
+        // 关键：遮罩层会先挂在屏幕上等底图，抓图必须排除 PinSnap 自己的所有窗口，
+        // 否则截图里会连遮罩、工具栏一起截进去。
+        let ownBundleID = Bundle.main.bundleIdentifier
+        let ownApps = content.applications.filter { $0.bundleIdentifier == ownBundleID }
+        let filter = SCContentFilter(display: display,
+                                     excludingApplications: ownApps,
+                                     exceptingWindows: [])
         let configuration = SCStreamConfiguration()
         configuration.width = max(1, Int(CGFloat(display.width) * scale))
         configuration.height = max(1, Int(CGFloat(display.height) * scale))

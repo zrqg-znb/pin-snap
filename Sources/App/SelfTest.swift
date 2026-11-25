@@ -19,7 +19,11 @@ enum SelfTest {
         NSLog("PinSnap self-test: starting capture")
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
             let index = Int(ProcessInfo.processInfo.environment["PINSNAP_AUTOTEST_SCREEN_INDEX"] ?? "0") ?? 0
-            if ProcessInfo.processInfo.environment["PINSNAP_AUTOTEST_REGION"] == "1" {
+            if ProcessInfo.processInfo.environment["PINSNAP_AUTOTEST_FASTDRAG"] == "1"
+                || ProcessInfo.processInfo.environment["PINSNAP_AUTOTEST_CANCELDURINGCAPTURE"] == "1" {
+                // 关键：不能用预设选区，否则直接进 editing，测不到 selecting 拖拽路径。
+                coordinator.beginRegionCapture()
+            } else if ProcessInfo.processInfo.environment["PINSNAP_AUTOTEST_REGION"] == "1" {
                 coordinator.beginRegionCaptureForTest(NSRect(x: 240, y: 220, width: 900, height: 560),
                                                       screenIndex: index)
             } else {
@@ -47,6 +51,53 @@ enum SelfTest {
                 let result = coordinator.autotestDumpBase(to: "/tmp/pinsnap-base.png")
                 NSLog("PinSnap self-test base dump: \(result)")
             }
+        }
+        if ProcessInfo.processInfo.environment["PINSNAP_AUTOTEST_TOOLBAR"] == "1" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) {
+                coordinator.autotestSeedAnnotations()
+                NSLog("PinSnap toolbar dump: \(coordinator.autotestDumpToolbar(to: "/tmp/pinsnap-toolbar-render.png"))")
+                NSLog("PinSnap palette shape: \(coordinator.autotestDumpPalette(text: false, to: "/tmp/pinsnap-palette-shape.png"))")
+                NSLog("PinSnap palette text: \(coordinator.autotestDumpPalette(text: true, to: "/tmp/pinsnap-palette-text.png"))")
+                NSLog("PinSnap editor dump: \(coordinator.autotestDumpEditorRegion(to: "/tmp/pinsnap-editor-render.png"))")
+                NSApp.terminate(nil)
+            }
+            return
+        }
+        if ProcessInfo.processInfo.environment["PINSNAP_AUTOTEST_PALETTE"] == "1" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.6) {
+                NSLog("PinSnap palette stability: \(coordinator.autotestPaletteStability())")
+                NSLog("PinSnap palette shape: \(coordinator.autotestDumpPalette(text: false, to: "/tmp/pinsnap-palette-shape.png"))")
+                NSLog("PinSnap palette text: \(coordinator.autotestDumpPalette(text: true, to: "/tmp/pinsnap-palette-text.png"))")
+                NSLog("PinSnap toolbar dump: \(coordinator.autotestDumpToolbar(to: "/tmp/pinsnap-toolbar-render.png"))")
+                NSApp.terminate(nil)
+            }
+            return
+        }
+        if ProcessInfo.processInfo.environment["PINSNAP_AUTOTEST_CANCELDURINGCAPTURE"] == "1" {
+            // 1.0s 触发截图，1.15s 底图还没回来就按 Esc；3.0s 底图回来时不能凭空复活编辑器。
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.15) {
+                NSLog("PinSnap cancel-mid-capture: \(coordinator.autotestCancel())")
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.2) {
+                NSLog("PinSnap cancel-mid-capture result: editorPresent=\(coordinator.hasEditor)")
+                NSApp.terminate(nil)
+            }
+            return
+        }
+        if ProcessInfo.processInfo.environment["PINSNAP_AUTOTEST_FASTDRAG"] == "1" {
+            // 1.0s 触发区域截图；1.15s —— 抓图还没完成（冷启动 ~1.3s）——
+            // 立刻模拟拖拽。修复后遮罩应已就绪并能直接画出选区。
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.15) {
+                NSLog("PinSnap fastdrag: phase=\(coordinator.autotestPhaseName) editorPresent=\(coordinator.hasEditor)")
+                NSLog("PinSnap fastdrag: \(coordinator.autotestSimulateDrag())")
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+                NSLog("PinSnap fastdrag after snapshot: phase=\(coordinator.autotestPhaseName) editorPresent=\(coordinator.hasEditor)")
+                NSLog("PinSnap fastdrag dump: \(coordinator.autotestDumpEditorRegion(to: "/tmp/pinsnap-fastdrag.png"))")
+                NSLog("PinSnap fastdrag export: \(coordinator.autotestExport(to: "/tmp/pinsnap-fastdrag-export.png"))")
+                NSApp.terminate(nil)
+            }
+            return
         }
         if ProcessInfo.processInfo.environment["PINSNAP_AUTOTEST_CANCEL"] == "1" {
             DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) {
