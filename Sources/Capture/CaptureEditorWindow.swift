@@ -32,6 +32,17 @@ final class CaptureEditorWindow: NSWindow {
     required init?(coder: NSCoder) { nil }
     override var canBecomeKey: Bool { true }
 
+    // 全局快捷键触发后，应用可能仍处于非激活状态；保证覆盖层可立即成为 key window。
+    override func becomeKey() {
+        super.becomeKey()
+        makeFirstResponder(editor)
+    }
+
+    func prepareForUserInput() {
+        ignoresMouseEvents = false
+        makeFirstResponder(editor)
+    }
+
     func exportedImage() -> NSImage? { editor.renderSelection() }
 
     func exportedCGImage() -> CGImage? { editor.renderSelectionCGImage() }
@@ -41,6 +52,8 @@ final class CaptureEditorWindow: NSWindow {
     func seedTestAnnotations() { editor.seedTestAnnotations() }
 
     func autotestVerifyGeometry() -> String { editor.autotestVerifyGeometry() }
+
+    func autotestVerifySelectionResize() -> String { editor.autotestVerifySelectionResize() }
 
     func autotestCopy() -> String {
         editor.copyForSelfTest()
@@ -74,6 +87,21 @@ final class CaptureEditView: NSView, NSTextFieldDelegate {
 
     private enum Phase { case selecting, editing }
 
+    private enum SelectionHandle: CaseIterable {
+        case topLeft, top, topRight, right, bottomRight, bottom, bottomLeft, left
+
+        var cursor: NSCursor {
+            switch self {
+            case .topLeft, .bottomRight: return .crosshair
+            case .topRight, .bottomLeft: return .crosshair
+            case .top, .bottom: return .resizeUpDown
+            case .left, .right: return .resizeLeftRight
+            }
+        }
+    }
+
+    private let handleSize: CGFloat = 10
+    private let minimumSelectionSize = NSSize(width: 8, height: 8)
     private let baseCGImage: CGImage
     private let baseDrawRect: NSRect
     private let scale: CGFloat
@@ -81,6 +109,8 @@ final class CaptureEditView: NSView, NSTextFieldDelegate {
     private var phase: Phase
     private var selection: NSRect
     private var startPoint: NSPoint?
+    private var resizingHandle: SelectionHandle?
+    private var resizeInitialSelection: NSRect?
     private var annotations: [Annotation] = []
     private var redoStack: [Annotation] = []
     private var tool: AnnotationTool = .rectangle
@@ -135,6 +165,9 @@ final class CaptureEditView: NSView, NSTextFieldDelegate {
 
     required init?(coder: NSCoder) { nil }
     override var isFlipped: Bool { true }
+    // 全局快捷键触发后，应用可能仍处于非激活状态；让内容视图接收激活窗口的第一下点击。
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
     override var acceptsFirstResponder: Bool { true }
 
     override func viewDidMoveToWindow() {
@@ -151,7 +184,45 @@ final class CaptureEditView: NSView, NSTextFieldDelegate {
     }
 
     override func resetCursorRects() {
-        addCursorRect(bounds, cursor: phase == .selecting ? .crosshair : .arrow)
+        if phase == .selecting {
+            addCursorRect(bounds, cursor: .crosshair)
+        } else {
+            addCursorRect(bounds, cursor: .arrow)
+            for handle in SelectionHandle.allCases {
+                addCursorRect(handleRect(handle), cursor: handle.cursor)
+            }
+        }
+    }
+
+    private func handleRect(_ handle: SelectionHandle) -> NSRect {
+        let center = handleCenter(handle)
+        return NSRect(x: center.x - handleSize / 2, y: center.y - handleSize / 2,
+                      width: handleSize, height: handleSize)
+    }
+
+    private func handleCenter(_ handle: SelectionHandle) -> NSPoint {
+        switch handle {
+        case .topLeft: return NSPoint(x: selection.minX, y: selection.minY)
+        case .top: return NSPoint(x: selection.midX, y: selection.minY)
+        case .topRight: return NSPoint(x: selection.maxX, y: selection.minY)
+        case .right: return NSPoint(x: selection.maxX, y: selection.midY)
+        case .bottomRight: return NSPoint(x: selection.maxX, y: selection.maxY)
+        case .bottom: return NSPoint(x: selection.midX, y: selection.maxY)
+        case .bottomLeft: return NSPoint(x: selection.minX, y: selection.maxY)
+        case .left: return NSPoint(x: selection.minX, y: selection.midY)
+        }
+    }
+
+    private func handleHitRect(_ handle: SelectionHandle) -> NSRect {
+        handleRect(handle).insetBy(dx: -4, dy: -4)
+    }
+
+    private func handle(at point: NSPoint) -> SelectionHandle? {
+        guard phase == .editing, !selection.isEmpty else { return nil }
+        // Corners win over edge handles when their hit areas overlap.
+        let handles: [SelectionHandle] = [.topLeft, .topRight, .bottomRight, .bottomLeft,
+                                          .top, .right, .bottom, .left]
+        return handles.first { handleHitRect($0).contains(point) }
     }
 
     private func buildToolbar() {
@@ -335,6 +406,12 @@ final class CaptureEditView: NSView, NSTextFieldDelegate {
         border.lineWidth = 1.5
         border.stroke()
 
+        NSColor.systemBlue.setFill()
+        for handle in SelectionHandle.allCases {
+            let rect = handleRect(handle)
+            NSBezierPath(roundedRect: rect, xRadius: 2, yRadius: 2).fill()
+        }
+
         let label = "\(Int(selection.width)) × \(Int(selection.height))"
         let attributes: [NSAttributedString.Key: Any] = [
             .font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .medium),
@@ -391,6 +468,12 @@ final class CaptureEditView: NSView, NSTextFieldDelegate {
             needsDisplay = true
             return
         }
+        if let handle = handle(at: point) {
+            resizingHandle = handle
+            resizeInitialSelection = selection
+            startPoint = point
+            return
+        }
         guard selection.contains(point) else { return }
         if let textField {
             commitText(textField)
@@ -421,6 +504,13 @@ final class CaptureEditView: NSView, NSTextFieldDelegate {
             guard let startPoint else { return }
             selection = NSRect(x: min(startPoint.x, point.x), y: min(startPoint.y, point.y),
                                width: abs(point.x - startPoint.x), height: abs(point.y - startPoint.y))
+            needsDisplay = true
+            return
+        }
+        if let resizingHandle, let resizeInitialSelection {
+            selection = resizedSelection(from: resizeInitialSelection, handle: resizingHandle, to: point)
+            positionToolbar()
+            window?.invalidateCursorRects(for: self)
             needsDisplay = true
             return
         }
@@ -455,6 +545,15 @@ final class CaptureEditView: NSView, NSTextFieldDelegate {
             selection = selection.intersection(baseDrawRect)
             guard !selection.isEmpty else { return }
             enterEditing()
+            return
+        }
+        if resizingHandle != nil {
+            resizingHandle = nil
+            resizeInitialSelection = nil
+            startPoint = nil
+            rebuildSampler()
+            positionToolbar()
+            needsDisplay = true
             return
         }
         switch tool {
@@ -501,6 +600,36 @@ final class CaptureEditView: NSView, NSTextFieldDelegate {
         needsDisplay = true
         window?.makeFirstResponder(self)
         window?.invalidateCursorRects(for: self)
+    }
+
+    private func resizedSelection(from initial: NSRect, handle: SelectionHandle, to point: NSPoint) -> NSRect {
+        let point = NSPoint(x: min(max(point.x, baseDrawRect.minX), baseDrawRect.maxX),
+                            y: min(max(point.y, baseDrawRect.minY), baseDrawRect.maxY))
+        var minX = initial.minX, maxX = initial.maxX
+        var minY = initial.minY, maxY = initial.maxY
+        switch handle {
+        case .topLeft:
+            minX = min(point.x, maxX - minimumSelectionSize.width)
+            minY = min(point.y, maxY - minimumSelectionSize.height)
+        case .top:
+            minY = min(point.y, maxY - minimumSelectionSize.height)
+        case .topRight:
+            maxX = max(point.x, minX + minimumSelectionSize.width)
+            minY = min(point.y, maxY - minimumSelectionSize.height)
+        case .right:
+            maxX = max(point.x, minX + minimumSelectionSize.width)
+        case .bottomRight:
+            maxX = max(point.x, minX + minimumSelectionSize.width)
+            maxY = max(point.y, minY + minimumSelectionSize.height)
+        case .bottom:
+            maxY = max(point.y, minY + minimumSelectionSize.height)
+        case .bottomLeft:
+            minX = min(point.x, maxX - minimumSelectionSize.width)
+            maxY = max(point.y, minY + minimumSelectionSize.height)
+        case .left:
+            minX = min(point.x, maxX - minimumSelectionSize.width)
+        }
+        return NSRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
     }
 
     private func presentTextField(at point: NSPoint) {
@@ -661,6 +790,32 @@ final class CaptureEditView: NSView, NSTextFieldDelegate {
         let verdict = diff.max <= 1 ? "PASS" : "FAIL"
         return String(format: "%@ 裁剪原点应为(%.0f,%.0f) 平均差=%.3f 最大差=%d",
                       verdict, expect.minX, expect.minY, diff.avg, diff.max)
+    }
+
+    /// 回归选区八个把手：验证每个方向都受最小尺寸和底图边界约束。
+    func autotestVerifySelectionResize() -> String {
+        guard phase == .editing, !selection.isEmpty else { return "no-selection" }
+        let original = selection
+        defer { selection = original; positionToolbar(); needsDisplay = true }
+        let checks: [(SelectionHandle, NSPoint)] = [
+            (.topLeft, NSPoint(x: baseDrawRect.minX - 80, y: baseDrawRect.minY - 80)),
+            (.top, NSPoint(x: original.midX, y: baseDrawRect.minY - 80)),
+            (.topRight, NSPoint(x: baseDrawRect.maxX + 80, y: baseDrawRect.minY - 80)),
+            (.right, NSPoint(x: baseDrawRect.maxX + 80, y: original.midY)),
+            (.bottomRight, NSPoint(x: baseDrawRect.maxX + 80, y: baseDrawRect.maxY + 80)),
+            (.bottom, NSPoint(x: original.midX, y: baseDrawRect.maxY + 80)),
+            (.bottomLeft, NSPoint(x: baseDrawRect.minX - 80, y: baseDrawRect.maxY + 80)),
+            (.left, NSPoint(x: baseDrawRect.minX - 80, y: original.midY))
+        ]
+        for (handle, point) in checks {
+            let resized = resizedSelection(from: original, handle: handle, to: point)
+            guard baseDrawRect.contains(resized),
+                  resized.width >= minimumSelectionSize.width,
+                  resized.height >= minimumSelectionSize.height else {
+                return "FAIL \(handle) result=\(resized) base=\(baseDrawRect)"
+            }
+        }
+        return "PASS 八向选区调整边界与最小尺寸"
     }
 
     /// 两张同尺寸位图的逐像素最大通道差

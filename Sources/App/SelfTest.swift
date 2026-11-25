@@ -31,6 +31,7 @@ enum SelfTest {
         // 几何自证必须在打标注之前跑，保证比的是纯底图。
         DispatchQueue.main.asyncAfter(deadline: .now() + 3.3) {
             NSLog("PinSnap self-test geometry: \(coordinator.autotestVerifyGeometry())")
+            NSLog("PinSnap self-test selection resize: \(coordinator.autotestVerifySelectionResize())")
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) {
             coordinator.autotestSeedAnnotations()

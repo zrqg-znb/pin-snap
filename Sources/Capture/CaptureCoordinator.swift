@@ -74,7 +74,17 @@ final class CaptureCoordinator {
             self?.editorClosed()
         }
         editorWindow = window
+        // 先让覆盖层进屏幕和成为 key window，再交给下一轮 RunLoop 确认第一响应者。
+        // 全局快捷键触发时，避免首个 mouseDown 被旧前台应用或空 first responder 吞掉。
         window.makeKeyAndOrderFront(nil)
+        window.prepareForUserInput()
+        DispatchQueue.main.async { [weak window] in
+            guard let window, window.isVisible else { return }
+            NSApp.activate(ignoringOtherApps: true)
+            window.makeKey()
+            window.prepareForUserInput()
+            NSLog("PinSnap: editor input ready key=\(window.isKeyWindow) firstResponder=\(String(describing: window.firstResponder))")
+        }
         NSLog("PinSnap: editor presented screen=\(snapshot.screenFrame) window=\(window.frame) content=\(window.contentView?.frame ?? .zero) visible=\(window.isVisible) alpha=\(window.alphaValue) level=\(window.level.rawValue) behavior=\(window.collectionBehavior.rawValue) occlusion=\(window.occlusionState.rawValue) screen=\(window.screen?.localizedName ?? "nil")")
     }
 
@@ -149,6 +159,10 @@ final class CaptureCoordinator {
 
     func autotestVerifyGeometry() -> String {
         editorWindow?.autotestVerifyGeometry() ?? "no-editor"
+    }
+
+    func autotestVerifySelectionResize() -> String {
+        editorWindow?.autotestVerifySelectionResize() ?? "no-editor"
     }
 
     func autotestCopy() -> String {
