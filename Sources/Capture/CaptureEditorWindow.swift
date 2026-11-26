@@ -49,6 +49,8 @@ final class CaptureEditorWindow: NSWindow {
 
     func dumpBaseImage(to path: String) -> String { editor.dumpBaseImage(to: path) }
 
+    func dumpWholeView(to path: String) -> String { editor.dumpWholeView(to: path) }
+
     func seedTestAnnotations() { editor.seedTestAnnotations() }
 
     func autotestVerifyGeometry() -> String { editor.autotestVerifyGeometry() }
@@ -225,6 +227,7 @@ final class CaptureEditView: NSView, NSTextFieldDelegate {
     private var paletteColorButtons: [NSButton] = []
     private var paletteDotButtons: [NSButton] = []
     private var paletteFontPopup: NSPopUpButton?
+    private var toolbarBuilt = false
     private var paletteBuilt = false
     private var paletteVC: NSViewController?
     // 参考图色板顺序：红、橙、绿、蓝、黑、灰、白。
@@ -241,6 +244,12 @@ final class CaptureEditView: NSView, NSTextFieldDelegate {
     }
     private var pendingTextStyle: PendingTextStyle?
     private var notice: String?
+    /// 底图还没回来时窗口保持全透明：让用户直接看到当前桌面，
+    /// 而不是一块「铺了深色底 + 遮罩、但底下什么都没有」的黑屏。
+    private var isPlaceholder = false
+    /// 底图落位时暗化层从 0 淡入，避免整屏亮度硬跳变。
+    private var dimProgress: CGFloat = 1
+    private var dimTimer: Timer?
 
     init(snapshot: CaptureSnapshot, presetSelection: NSRect?, pinController: PinController?, centeredImage: Bool = false) {
         self.pinController = pinController
@@ -248,6 +257,8 @@ final class CaptureEditView: NSView, NSTextFieldDelegate {
         // 用 pointSize（pixelSize/scale）而不是 image.width：占位底图只有 1×1 像素，
         // 若按图片宽度反推，baseDrawRect 会缩成 1×1，选区 intersection 后直接被裁空。
         let pointSize = snapshot.pointSize
+        isPlaceholder = snapshot.image.width <= 1 && snapshot.image.height <= 1
+        if isPlaceholder { dimProgress = 0 }
 
         if centeredImage {
             let canvas = snapshot.screenFrame.size
@@ -271,8 +282,10 @@ final class CaptureEditView: NSView, NSTextFieldDelegate {
         }
         super.init(frame: NSRect(origin: .zero, size: snapshot.screenFrame.size))
         wantsLayer = true
-        buildToolbar()
+        // 工具栏只在编辑阶段才需要。区域截图先进入 selecting，此刻建它纯属拖慢首帧：
+        // 十几个按钮 + SF Symbol + 约束一次要 50ms 上下，用户正是在等这一下。
         if phase == .editing {
+            ensureToolbar()
             rebuildSampler()
             positionToolbar()
         }
@@ -351,6 +364,14 @@ final class CaptureEditView: NSView, NSTextFieldDelegate {
         let handles: [SelectionHandle] = [.topLeft, .topRight, .bottomRight, .bottomLeft,
                                           .top, .right, .bottom, .left]
         return handles.first { handleHitRect($0).contains(point) }
+    }
+
+    private func ensureToolbar() {
+        guard !toolbarBuilt else { return }
+        toolbarBuilt = true
+        buildToolbar()
+        // 延迟构建的按钮也要按当前屏幕倍率栅格化，否则圆角在 Retina 上是锯齿。
+        updateLayerScales()
     }
 
     private func buildToolbar() {
@@ -694,6 +715,14 @@ final class CaptureEditView: NSView, NSTextFieldDelegate {
     override func draw(_ dirtyRect: NSRect) {
         guard let context = NSGraphicsContext.current?.cgContext else { return }
 
+        // 底图还在路上：窗口是 clear 的，这里一像素都不画，用户看到的就是实时桌面。
+        // 旧实现在这里先铺 0.1 灰底再叠 35% 遮罩，占位图又是 1×1 透明图，
+        // 于是按下快捷键的头一秒整屏是纯黑 —— 这就是「闪一下黑屏」的来源。
+        guard !isPlaceholder else {
+            drawSelectionChrome()
+            return
+        }
+
         NSColor(calibratedWhite: 0.1, alpha: 1).setFill()
         bounds.fill()
         // 底图按原始像素落位：与窗口缩放一致时禁用插值，保证预览和导出一样锐利。
@@ -701,12 +730,14 @@ final class CaptureEditView: NSView, NSTextFieldDelegate {
         let viewScale = window?.backingScaleFactor ?? 1
         let baseQuality: CGInterpolationQuality = abs(drawScale - viewScale) < 0.01 ? .none : .high
         context.drawUprightCGImage(baseCGImage, in: baseDrawRect, quality: baseQuality)
+        // 自测转储时按满值画，免得淡入中途转储导致选区边缘的抗锯齿像素不稳定。
+        let dimAlpha = suppressChrome ? 1 : dimProgress
 
         if phase == .selecting {
             let dim = NSBezierPath(rect: bounds)
             if !selection.isEmpty { dim.append(NSBezierPath(rect: selection)) }
             dim.windingRule = .evenOdd
-            NSColor.black.withAlphaComponent(0.35).setFill()
+            NSColor.black.withAlphaComponent(0.35 * dimAlpha).setFill()
             dim.fill()
             drawSelectionChrome()
             return
@@ -715,7 +746,7 @@ final class CaptureEditView: NSView, NSTextFieldDelegate {
         let dim = NSBezierPath(rect: bounds)
         dim.append(NSBezierPath(rect: selection))
         dim.windingRule = .evenOdd
-        NSColor.black.withAlphaComponent(0.45).setFill()
+        NSColor.black.withAlphaComponent(0.45 * dimAlpha).setFill()
         dim.fill()
 
         context.saveGState()
@@ -952,6 +983,7 @@ final class CaptureEditView: NSView, NSTextFieldDelegate {
 
     private func enterEditing() {
         phase = .editing
+        ensureToolbar()
         toolbar.isHidden = false
         rebuildSampler()
         positionToolbar()
@@ -1241,8 +1273,39 @@ final class CaptureEditView: NSView, NSTextFieldDelegate {
         let pointSize = snapshot.pointSize
         baseDrawRect = NSRect(origin: .zero, size: pointSize)
         scale = CGFloat(snapshot.image.width) / max(baseDrawRect.width, 1)
+        let wasPlaceholder = isPlaceholder
+        isPlaceholder = false
         rebuildSampler()
+        if wasPlaceholder {
+            // 从「透明穿透的实时桌面」切到「底图 + 暗化层」：暗化层淡入，
+            // 底图本身是同一帧画面，视觉上只有一次轻微的调暗，不再有黑屏闪跳。
+            dimProgress = 0
+            animateDimIn()
+        }
         needsDisplay = true
+    }
+
+    private func animateDimIn() {
+        dimTimer?.invalidate()
+        let started = CACurrentMediaTime()
+        let duration: CFTimeInterval = 0.12
+        let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] timer in
+            guard let self else { timer.invalidate(); return }
+            let progress = min(1, (CACurrentMediaTime() - started) / duration)
+            self.dimProgress = CGFloat(progress)
+            self.needsDisplay = true
+            if progress >= 1 {
+                timer.invalidate()
+                self.dimTimer = nil
+            }
+        }
+        // .common：拖拽追踪开始后 default mode 会被挂起，动画必须照样跑完。
+        RunLoop.main.add(timer, forMode: .common)
+        dimTimer = timer
+    }
+
+    deinit {
+        dimTimer?.invalidate()
     }
 
     func dumpBaseImage(to path: String) -> String {
@@ -1250,6 +1313,29 @@ final class CaptureEditView: NSView, NSTextFieldDelegate {
         guard let data = rep.representation(using: .png, properties: [:]) else { return "no-png" }
         try? data.write(to: URL(fileURLWithPath: path))
         return "base=\(baseCGImage.width)x\(baseCGImage.height) selection=\(selection)"
+    }
+
+    /// 整视图转储 + 平均 alpha 采样。
+    /// 专门用来验证「占位期不画黑」：占位时窗口应当几乎全透明（alpha≈0，透出实时桌面），
+    /// 底图落位后应当接近不透明。旧实现在占位期铺满深色底，alpha 会直接顶到 255。
+    func dumpWholeView(to path: String) -> String {
+        guard let rep = bitmapImageRepForCachingDisplay(in: bounds) else { return "no-rep" }
+        cacheDisplay(in: bounds, to: rep)
+        try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
+
+        var alphaSum: CGFloat = 0
+        var samples = 0
+        let count = 400
+        for index in 0..<count {
+            let x = (index * 37 + 11) % max(rep.pixelsWide, 1)
+            let y = (index * 71 + 7) % max(rep.pixelsHigh, 1)
+            if let color = rep.colorAt(x: x, y: y) {
+                alphaSum += color.alphaComponent
+                samples += 1
+            }
+        }
+        let avg = samples > 0 ? Int((alphaSum / CGFloat(samples)) * 255) : -1
+        return "view=\(rep.pixelsWide)x\(rep.pixelsHigh) alpha=\(avg) placeholder=\(isPlaceholder) path=\(path)"
     }
 
     /// 只转储“用户实际看到的选区画面”（不含工具栏、遮罩、边框），

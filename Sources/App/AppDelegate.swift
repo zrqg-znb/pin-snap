@@ -25,6 +25,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if SelfTest.isEnabled {
             MainWindowController.shared.window?.orderOut(nil)
             SelfTest.run(coordinator: captureCoordinator, service: ScreenCaptureService())
+        } else {
+            // 菜单栏常驻，不缺这点空闲：启动稳定后先把抓图通道焐热。
+            // 不预热的话第一次按快捷键要干等 ScreenCaptureKit 冷启动 1s 上下。
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                self?.captureCoordinator.prewarmCapture()
+            }
         }
     }
 

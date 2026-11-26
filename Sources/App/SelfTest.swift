@@ -7,6 +7,25 @@ enum SelfTest {
 
     static func run(coordinator: CaptureCoordinator, service: ScreenCaptureService) {
         guard isEnabled else { return }
+        // 抓图耗时基准：BENCH=1 直接截图（冷启动），BENCH=2 先预热再截图。
+        // 两者对比的就是「预热到底省了多少」这个数，不靠猜。
+        if let bench = ProcessInfo.processInfo.environment["PINSNAP_AUTOTEST_BENCH"] {
+            Task { @MainActor in
+                guard let screen = NSScreen.screens.first else { NSApp.terminate(nil); return }
+                if bench == "2" {
+                    let start = CACurrentMediaTime()
+                    await service.prewarm()
+                    NSLog("PinSnap bench: prewarm \(ScreenCaptureService.ms(since: start))ms")
+                }
+                for run in 1...3 {
+                    let start = CACurrentMediaTime()
+                    _ = try? await service.snapshot(screen: screen)
+                    NSLog("PinSnap bench: run\(run) \(ScreenCaptureService.ms(since: start))ms cache=\(service.hasWarmCache)")
+                }
+                NSApp.terminate(nil)
+            }
+            return
+        }
         if ProcessInfo.processInfo.environment["PINSNAP_AUTOTEST_SCREENS"] == "1" {
             Task { @MainActor in
                 for screen in NSScreen.screens {
@@ -26,11 +45,25 @@ enum SelfTest {
             } else if ProcessInfo.processInfo.environment["PINSNAP_AUTOTEST_REGION"] == "1" {
                 coordinator.beginRegionCaptureForTest(NSRect(x: 240, y: 220, width: 900, height: 560),
                                                       screenIndex: index)
+            } else if ProcessInfo.processInfo.environment["PINSNAP_AUTOTEST_PLACEHOLDER"] == "1" {
+                // 走 selecting 阶段：没有工具栏挡住，转储出来的 alpha 才能直接反映遮罩本身。
+                coordinator.beginRegionCapture()
             } else {
                 // 全屏模式也支持指定屏幕，方便逐屏回归。
                 let screens = NSScreen.screens
                 coordinator.beginFullScreenCapture(on: screens.indices.contains(index) ? screens[index] : nil)
             }
+        }
+        // 占位期 vs 落位后：占位时窗口必须接近全透明（透出实时桌面，不能是黑屏）。
+        if ProcessInfo.processInfo.environment["PINSNAP_AUTOTEST_PLACEHOLDER"] == "1" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.03) {
+                NSLog("PinSnap placeholder frame: \(coordinator.autotestDumpWhole(to: "/tmp/pinsnap-placeholder.png"))")
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.60) {
+                NSLog("PinSnap loaded frame: \(coordinator.autotestDumpWhole(to: "/tmp/pinsnap-loaded.png"))")
+                NSApp.terminate(nil)
+            }
+            return
         }
         // 几何自证必须在打标注之前跑，保证比的是纯底图。
         DispatchQueue.main.asyncAfter(deadline: .now() + 3.3) {

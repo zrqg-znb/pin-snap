@@ -18,6 +18,14 @@ final class CaptureCoordinator {
         requestSnapshot(screen: target, presetSelection: nil, centeredImage: false)
     }
 
+    /// 把 ScreenCaptureKit 的冷启动（枚举窗口 + 建立抓图通道，热机 200ms、老机器能到 1s+）
+    /// 提前到 App 空闲时完成，用户按快捷键时只剩一次像素抓取。
+    func prewarmCapture() {
+        Task { [captureService] in
+            await captureService.prewarm()
+        }
+    }
+
     func beginFullScreenCapture(on screen: NSScreen? = nil) {
         guard let target = screen ?? Self.screenUnderMouse() else { return }
         requestSnapshot(screen: target,
@@ -66,8 +74,10 @@ final class CaptureCoordinator {
         }
         Task { [weak self] in
             guard let self else { return }
-            // 等主窗口真正离开屏幕，避免把 PinSnap 自己截进图里（抓图侧另有排除自身兜底）。
-            try? await Task.sleep(nanoseconds: 120_000_000)
+            // 旧实现在这里等 120ms「让主窗口离开屏幕」，但那点延迟靠 SCK 的
+            // excludingApplications 已经兜住了（PinSnap 的所有窗口都不会进底图），
+            // 只留一小段让窗口事务落定，剩下的时间全交给抓图本身。
+            try? await Task.sleep(nanoseconds: 20_000_000)
             do {
                 let snapshot = try await captureService.snapshot(screen: screen)
                 NSLog("PinSnap: snapshot ok \(snapshot.pixelSize)")
@@ -104,6 +114,7 @@ final class CaptureCoordinator {
     private func presentEditor(snapshot: CaptureSnapshot,
                                presetSelection: NSRect?,
                                centeredImage: Bool) {
+        let started = CACurrentMediaTime()
         NSApp.activate(ignoringOtherApps: true)
         let window = CaptureEditorWindow(snapshot: snapshot,
                                          presetSelection: presetSelection,
@@ -111,6 +122,7 @@ final class CaptureCoordinator {
                                          centeredImage: centeredImage) { [weak self] in
             self?.editorClosed()
         }
+        let builtAt = CACurrentMediaTime()
         editorWindow = window
         // 先让覆盖层进屏幕和成为 key window，再交给下一轮 RunLoop 确认第一响应者。
         // 全局快捷键触发时，避免首个 mouseDown 被旧前台应用或空 first responder 吞掉。
@@ -123,7 +135,9 @@ final class CaptureCoordinator {
             window.prepareForUserInput()
             NSLog("PinSnap: editor input ready key=\(window.isKeyWindow) firstResponder=\(String(describing: window.firstResponder))")
         }
-        NSLog("PinSnap: editor presented screen=\(snapshot.screenFrame) window=\(window.frame) content=\(window.contentView?.frame ?? .zero) visible=\(window.isVisible) alpha=\(window.alphaValue) level=\(window.level.rawValue) behavior=\(window.collectionBehavior.rawValue) occlusion=\(window.occlusionState.rawValue) screen=\(window.screen?.localizedName ?? "nil")")
+        NSLog("PinSnap: editor presented build=\(ScreenCaptureService.ms(since: started))ms "
+              + "orderFront=\(ScreenCaptureService.ms(since: builtAt))ms "
+              + "screen=\(snapshot.screenFrame) window=\(window.frame) content=\(window.contentView?.frame ?? .zero) visible=\(window.isVisible) alpha=\(window.alphaValue) level=\(window.level.rawValue) behavior=\(window.collectionBehavior.rawValue) occlusion=\(window.occlusionState.rawValue) screen=\(window.screen?.localizedName ?? "nil")")
     }
 
     private func presentWindowPicker(windows: [SCWindow]) {
@@ -162,6 +176,11 @@ final class CaptureCoordinator {
         captureGeneration += 1
         editorWindow = nil
         onEditorClosed?()
+        // 刚用完就顺手把缓存刷一遍：窗口列表和分辨率都还是热的，下次截图不用再枚举。
+        // 延迟两秒避开关闭动画和剪贴板写入，别跟用户正在做的事抢资源。
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+            self?.prewarmCapture()
+        }
     }
 
     func autotestExport(to path: String) -> String {
@@ -184,6 +203,10 @@ final class CaptureCoordinator {
 
     func autotestDumpBase(to path: String) -> String {
         editorWindow?.dumpBaseImage(to: path) ?? "no-editor"
+    }
+
+    func autotestDumpWhole(to path: String) -> String {
+        editorWindow?.dumpWholeView(to: path) ?? "no-editor"
     }
 
     func autotestDumpToolbar(to path: String) -> String {
