@@ -105,10 +105,14 @@ enum AnnotationRenderer {
                      scale: CGFloat) {
         switch annotation.kind {
         case .rectangle:
-            let rect = annotation.bounds.offsetBy(dx: offset.x, dy: offset.y)
-            let path = NSBezierPath(rect: rect)
-            path.lineWidth = annotation.lineWidth
+            let rect = annotation.bounds.offsetBy(dx: offset.x, dy: offset.y).integral
+            guard rect.width > 0, rect.height > 0 else { return }
             annotation.color.setStroke()
+            let path = NSBezierPath(roundedRect: rect.insetBy(dx: annotation.lineWidth / 2, dy: annotation.lineWidth / 2),
+                                    xRadius: min(4, rect.width / 5),
+                                    yRadius: min(4, rect.height / 5))
+            path.lineWidth = annotation.lineWidth
+            path.lineJoinStyle = .round
             path.stroke()
 
         case .arrow:
@@ -163,10 +167,10 @@ enum AnnotationRenderer {
         let shaftEnd = NSPoint(x: end.x - cos(angle) * headLength * 0.72,
                                y: end.y - sin(angle) * headLength * 0.72)
 
-        let path = NSBezierPath()
-        path.lineWidth = lineWidth
-        path.lineCapStyle = .round
-        path.lineJoinStyle = .miter
+            let path = NSBezierPath()
+            path.lineWidth = lineWidth
+            path.lineCapStyle = .round
+            path.lineJoinStyle = .round
         path.move(to: start)
         path.line(to: shaftEnd)
 

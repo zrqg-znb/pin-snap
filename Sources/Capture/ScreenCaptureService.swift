@@ -141,17 +141,22 @@ final class ScreenCaptureService {
         }.sorted { $0.frame.width * $0.frame.height > $1.frame.width * $1.frame.height }
     }
 
-    func capture(window: SCWindow) async throws -> NSImage {
-        let scale = screenScale(containing: window.frame)
+    /// 截取指定窗口，并保留窗口所在显示器的坐标系与缩放比。
+    /// 不能把窗口截图一律投到主屏：混合 1x/2x 多显示器下会导致编辑画布和 Pin 的逻辑尺寸错误。
+    func capture(window: SCWindow) async throws -> CaptureSnapshot {
+        let info = await MainActor.run { Self.screenInfo(containing: window.frame) }
         let filter = SCContentFilter(desktopIndependentWindow: window)
         let configuration = SCStreamConfiguration()
-        configuration.width = max(1, Int(window.frame.width * scale))
-        configuration.height = max(1, Int(window.frame.height * scale))
+        configuration.width = max(1, Int(window.frame.width * info.scale))
+        configuration.height = max(1, Int(window.frame.height * info.scale))
         configuration.showsCursor = false
         configuration.captureResolution = .best
         configuration.scalesToFit = false
         let image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration)
-        return NSImage(cgImage: image, size: window.frame.size)
+        return CaptureSnapshot(image: image,
+                               pixelSize: CGSize(width: image.width, height: image.height),
+                               screenFrame: info.frame,
+                               scale: info.scale)
     }
 
     /// 命中缓存就直接用；显示器被插拔过（displayID 对不上）就重新枚举一次。
@@ -175,12 +180,17 @@ final class ScreenCaptureService {
         return content.applications.filter { $0.bundleIdentifier == ownBundleID }
     }
 
-    private func screenScale(containing frame: NSRect) -> CGFloat {
+    private static func screenInfo(containing frame: NSRect) -> ScreenInfo {
         let center = NSPoint(x: frame.midX, y: frame.midY)
-        if let screen = NSScreen.screens.first(where: { $0.frame.contains(center) }) {
-            return screen.backingScaleFactor
-        }
-        return NSScreen.main?.backingScaleFactor ?? 2
+        let screen = NSScreen.screens.first(where: { $0.frame.contains(center) }) ?? NSScreen.main
+        return ScreenInfo(displayID: screen.map(Self.displayID(of:)) ?? CGMainDisplayID(),
+                          scale: screen?.backingScaleFactor ?? 2,
+                          frame: screen?.frame ?? NSRect(x: 0, y: 0, width: 1440, height: 900),
+                          name: screen?.localizedName ?? "未知屏幕")
+    }
+
+    private func screenScale(containing frame: NSRect) -> CGFloat {
+        Self.screenInfo(containing: frame).scale
     }
 
     static func displayID(of screen: NSScreen) -> CGDirectDisplayID {

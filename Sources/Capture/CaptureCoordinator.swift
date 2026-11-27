@@ -2,7 +2,15 @@ import Cocoa
 import ScreenCaptureKit
 
 final class CaptureCoordinator {
+    private enum CaptureState {
+        case idle
+        case capturing(Int)
+        case editing(Int)
+        case pickingWindow(Int)
+    }
+
     var pinController: PinController?
+    var historyStore: ScreenshotHistoryStore?
     var onEditorPresented: (() -> Void)?
     var onEditorClosed: (() -> Void)?
 
@@ -11,11 +19,15 @@ final class CaptureCoordinator {
     private var windowPicker: WindowPickerPanel?
     /// 每次截图请求的代号；用户在抓图回来前取消或发起新截图时递增，让在途结果作废。
     private var captureGeneration = 0
+    private var captureState: CaptureState = .idle
 
     func beginRegionCapture(on screen: NSScreen? = nil) {
         // 用鼠标所在的屏幕，否则双屏时会在错误的那块屏上出现遮罩。
         guard let target = screen ?? Self.screenUnderMouse() else { return }
-        requestSnapshot(screen: target, presetSelection: nil, centeredImage: false)
+        requestSnapshot(screen: target,
+                        presetSelection: nil,
+                        centeredImage: false,
+                        generation: beginNewSession())
     }
 
     /// 把 ScreenCaptureKit 的冷启动（枚举窗口 + 建立抓图通道，热机 200ms、老机器能到 1s+）
@@ -30,7 +42,8 @@ final class CaptureCoordinator {
         guard let target = screen ?? Self.screenUnderMouse() else { return }
         requestSnapshot(screen: target,
                         presetSelection: NSRect(origin: .zero, size: target.frame.size),
-                        centeredImage: false)
+                        centeredImage: false,
+                        generation: beginNewSession())
     }
 
     static func screenUnderMouse() -> NSScreen? {
@@ -39,22 +52,62 @@ final class CaptureCoordinator {
     }
 
     func chooseWindowCapture() {
+        let generation = beginNewSession()
+        captureState = .pickingWindow(generation)
         Task { [weak self] in
             guard let self else { return }
             do {
                 let windows = try await captureService.listCapturableWindows()
                 await MainActor.run {
-                    self.presentWindowPicker(windows: windows)
+                    guard self.isCurrentSession(generation) else { return }
+                    self.presentWindowPicker(windows: windows, generation: generation)
                 }
             } catch {
-                self.showCaptureError(error)
+                await MainActor.run {
+                    guard self.isCurrentSession(generation) else { return }
+                    self.finishSession(generation: generation)
+                    self.showCaptureError(error)
+                }
             }
         }
     }
 
-    private func requestSnapshot(screen: NSScreen, presetSelection: NSRect?, centeredImage: Bool) {
+    /// 开始新会话时，主动关闭旧编辑器/选择器并使其异步结果失效。
+    /// 不能仅覆盖 editorWindow 引用，否则旧的全屏窗口会残留并在关闭时误清空新会话。
+    private func beginNewSession() -> Int {
         captureGeneration += 1
         let generation = captureGeneration
+        if let windowPicker {
+            windowPicker.orderOut(nil)
+            self.windowPicker = nil
+        }
+        if let editorWindow {
+            editorWindow.closeSilently()
+            self.editorWindow = nil
+            onEditorClosed?()
+        }
+        captureState = .capturing(generation)
+        return generation
+    }
+
+    private func isCurrentSession(_ generation: Int) -> Bool {
+        generation == captureGeneration
+    }
+
+    private func finishSession(generation: Int) {
+        guard isCurrentSession(generation) else { return }
+        editorWindow = nil
+        windowPicker = nil
+        captureState = .idle
+        onEditorClosed?()
+    }
+
+    private func requestSnapshot(screen: NSScreen,
+                                 presetSelection: NSRect?,
+                                 centeredImage: Bool,
+                                 generation: Int) {
+        guard isCurrentSession(generation) else { return }
+        captureState = .capturing(generation)
         onEditorPresented?()
         // 抓图要 1s+（ScreenCaptureKit 冷启动），这段时间不能是白屏：
         // 先挂上遮罩层立刻接管鼠标，等底图回来再原地填充。
@@ -70,7 +123,8 @@ final class CaptureCoordinator {
             )
             presentEditor(snapshot: placeholder,
                           presetSelection: presetSelection,
-                          centeredImage: false)
+                          centeredImage: false,
+                          generation: generation)
         }
         Task { [weak self] in
             guard let self else { return }
@@ -90,21 +144,23 @@ final class CaptureCoordinator {
                     }
                     if let window = self.editorWindow {
                         window.applySnapshot(snapshot)
+                        self.captureState = .editing(generation)
                     } else if centeredImage {
                         self.presentEditor(snapshot: snapshot,
                                            presetSelection: presetSelection,
-                                           centeredImage: centeredImage)
+                                           centeredImage: centeredImage,
+                                           generation: generation)
                     }
                 }
             } catch {
                 NSLog("PinSnap: snapshot failed \(error)")
                 await MainActor.run {
                     // 占位遮罩已经挂出来了，失败必须收掉，否则会留下一块灰屏。
+                    guard self.isCurrentSession(generation) else { return }
                     if let window = self.editorWindow {
-                        window.close()
-                        self.editorWindow = nil
-                        self.onEditorClosed?()
+                        window.closeSilently()
                     }
+                    self.finishSession(generation: generation)
                     self.showCaptureError(error)
                 }
             }
@@ -113,17 +169,21 @@ final class CaptureCoordinator {
 
     private func presentEditor(snapshot: CaptureSnapshot,
                                presetSelection: NSRect?,
-                               centeredImage: Bool) {
+                               centeredImage: Bool,
+                               generation: Int) {
+        guard isCurrentSession(generation) else { return }
         let started = CACurrentMediaTime()
         NSApp.activate(ignoringOtherApps: true)
         let window = CaptureEditorWindow(snapshot: snapshot,
                                          presetSelection: presetSelection,
                                          pinController: pinController,
+                                         historyStore: historyStore,
                                          centeredImage: centeredImage) { [weak self] in
-            self?.editorClosed()
+            self?.editorClosed(generation: generation)
         }
         let builtAt = CACurrentMediaTime()
         editorWindow = window
+        captureState = .editing(generation)
         // 先让覆盖层进屏幕和成为 key window，再交给下一轮 RunLoop 确认第一响应者。
         // 全局快捷键触发时，避免首个 mouseDown 被旧前台应用或空 first responder 吞掉。
         window.makeKeyAndOrderFront(nil)
@@ -140,31 +200,31 @@ final class CaptureCoordinator {
               + "screen=\(snapshot.screenFrame) window=\(window.frame) content=\(window.contentView?.frame ?? .zero) visible=\(window.isVisible) alpha=\(window.alphaValue) level=\(window.level.rawValue) behavior=\(window.collectionBehavior.rawValue) occlusion=\(window.occlusionState.rawValue) screen=\(window.screen?.localizedName ?? "nil")")
     }
 
-    private func presentWindowPicker(windows: [SCWindow]) {
+    private func presentWindowPicker(windows: [SCWindow], generation: Int) {
         let picker = WindowPickerPanel(windows: windows) { [weak self] selected in
-            guard let self else { return }
+            guard let self, self.isCurrentSession(generation) else { return }
             self.windowPicker = nil
             guard let selected else {
-                self.onEditorClosed?()
+                self.finishSession(generation: generation)
                 return
             }
+            self.captureState = .capturing(generation)
             Task {
                 do {
-                    let image = try await self.captureService.capture(window: selected)
+                    let snapshot = try await self.captureService.capture(window: selected)
                     await MainActor.run {
-                        guard let screen = NSScreen.main else { return }
-                        let scale = screen.backingScaleFactor
-                        let pointSize = image.size
-                        let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) ?? CGImageMini.placeholder
-                        let snapshot = CaptureSnapshot(image: cgImage,
-                                                       pixelSize: CGSize(width: pointSize.width * scale,
-                                                                         height: pointSize.height * scale),
-                                                       screenFrame: screen.frame,
-                                                       scale: scale)
-                        self.presentEditor(snapshot: snapshot, presetSelection: nil, centeredImage: true)
+                        guard self.isCurrentSession(generation) else { return }
+                        self.presentEditor(snapshot: snapshot,
+                                           presetSelection: nil,
+                                           centeredImage: true,
+                                           generation: generation)
                     }
                 } catch {
-                    self.showCaptureError(error)
+                    await MainActor.run {
+                        guard self.isCurrentSession(generation) else { return }
+                        self.finishSession(generation: generation)
+                        self.showCaptureError(error)
+                    }
                 }
             }
         }
@@ -172,9 +232,14 @@ final class CaptureCoordinator {
         picker.presentAsModalOverlay()
     }
 
-    private func editorClosed() {
+    private func editorClosed(generation: Int) {
+        guard isCurrentSession(generation) else {
+            NSLog("PinSnap: stale editor close ignored generation=\(generation) current=\(captureGeneration)")
+            return
+        }
         captureGeneration += 1
         editorWindow = nil
+        captureState = .idle
         onEditorClosed?()
         // 刚用完就顺手把缓存刷一遍：窗口列表和分辨率都还是热的，下次截图不用再枚举。
         // 延迟两秒避开关闭动画和剪贴板写入，别跟用户正在做的事抢资源。
@@ -192,8 +257,10 @@ final class CaptureCoordinator {
     }
 
     func dismissEditor() {
-        editorWindow?.close()
-        editorWindow = nil
+        guard let editorWindow else { return }
+        let generation = captureGeneration
+        editorWindow.closeSilently()
+        finishSession(generation: generation)
     }
 
     func autotestDumpView(to path: String) -> String {
@@ -232,7 +299,10 @@ final class CaptureCoordinator {
     func beginRegionCaptureForTest(_ rect: NSRect, screenIndex: Int = 0) {
         let screens = NSScreen.screens
         guard screens.indices.contains(screenIndex) else { return }
-        requestSnapshot(screen: screens[screenIndex], presetSelection: rect, centeredImage: false)
+        requestSnapshot(screen: screens[screenIndex],
+                        presetSelection: rect,
+                        centeredImage: false,
+                        generation: beginNewSession())
     }
 
     func autotestSeedAnnotations() {
@@ -262,6 +332,54 @@ final class CaptureCoordinator {
     }
 
     var pinnedCount: Int { pinController?.pinnedCount ?? -1 }
+    var pinnedMemoryBytes: Int { pinController?.estimatedMemoryBytes ?? -1 }
+
+    func autotestCloseAllPins() -> String {
+        pinController?.autotestCloseAll() ?? "no-pin-controller"
+    }
+
+    func autotestHistoryWrite() -> String {
+        guard let image = editorWindow?.exportedImage(), let historyStore else { return "no-editor-or-history" }
+        historyStore.selfTestReset()
+        switch historyStore.selfTestInsert(image) {
+        case .success(let item):
+            let exists = FileManager.default.fileExists(atPath: item.fileURL.path)
+            return "items=\(historyStore.allItems.count) exists=\(exists) pixels=\(item.pixelWidth)x\(item.pixelHeight) bytes=\(item.byteCount)"
+        case .failure(let error):
+            return "write-failed \(error.localizedDescription)"
+        }
+    }
+
+    func autotestHistoryClear() -> String {
+        guard let historyStore else { return "no-history" }
+        let cleared = historyStore.clearAll()
+        return "cleared=\(cleared) remaining=\(historyStore.allItems.count) bytes=\(historyStore.totalBytes)"
+    }
+
+    func autotestToolbarOCR() -> String {
+        editorWindow?.autotestExtractText() ?? "no-editor"
+    }
+
+    func autotestHistoryOCR() -> String {
+        guard let historyStore, let image = editorWindow?.exportedImage() else { return "no-editor-or-history" }
+        let text = historyStore.selfTestRecognize(image)
+        return "ocrChars=\(text.count)"
+    }
+
+    func autotestHistoryOCRIndex() -> String {
+        guard let image = editorWindow?.exportedImage(), let historyStore else { return "no-editor-or-history" }
+        historyStore.selfTestReset()
+        guard case .success = historyStore.selfTestInsert(image) else { return "write-failed" }
+        let deadline = Date().addingTimeInterval(6)
+        while Date() < deadline, historyStore.ocrPendingCount > 0 {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        }
+        guard let item = historyStore.allItems.first else { return "no-history-item" }
+        let matches = historyStore.search(item.ocrText).count
+        let result = "indexed=\(item.ocrIndexed) chars=\(item.ocrText.count) matches=\(matches)"
+        _ = historyStore.clearAll()
+        return result
+    }
 
     /// 锚点用「窗口内相对位置」(0~1) 表达，避免按绝对坐标算出的锚点落在窗口之外，
     /// 那样「锚点不动」就失去验证意义了。

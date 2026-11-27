@@ -4,6 +4,13 @@ import CoreGraphics
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let captureCoordinator = CaptureCoordinator()
     private let pinController = PinController()
+    private let historyStore = ScreenshotHistoryStore.shared
+    private lazy var historyWindowController = ScreenshotHistoryWindowController(
+        store: historyStore,
+        onPin: { [weak self] image in
+            self?.pinController.pin(image) ?? 0
+        }
+    )
     private var statusItem: NSStatusItem?
     private var hotkeyController: HotkeyController?
     private var tokens: [NSObjectProtocol] = []
@@ -17,7 +24,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         configureMenuBar()
 
         captureCoordinator.pinController = pinController
+        captureCoordinator.historyStore = historyStore
         captureCoordinator.onEditorPresented = { [weak self] in self?.hideMainWindowForCapture() }
+        captureCoordinator.onEditorClosed = { [weak self] in self?.restoreMainWindowAfterCapture() }
 
         hotkeyController = HotkeyController { [weak self] in self?.beginRegionCapture(nil) }
         hotkeyController?.registerDefaultShortcut()
@@ -43,7 +52,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func captureFullScreen(_ sender: Any?) { captureCoordinator.beginFullScreenCapture() }
     @objc private func captureRegion(_ sender: Any?) { beginRegionCapture(sender) }
     @objc private func captureWindow(_ sender: Any?) { captureCoordinator.chooseWindowCapture() }
+    @objc private func closeAllPins(_ sender: Any?) {
+        let closed = pinController.closeAll()
+        if closed == 0 {
+            NSSound.beep()
+        }
+    }
     @objc private func showMainWindow(_ sender: Any?) { MainWindowController.shared.showAndActivate() }
+    @objc private func showHistory(_ sender: Any?) { historyWindowController.showAndActivate() }
     @objc private func quit(_ sender: Any?) { NSApp.terminate(nil) }
 
     private func beginRegionCapture(_ sender: Any?) {
@@ -52,8 +68,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func hideMainWindowForCapture() {
         guard let window = MainWindowController.shared.window else { return }
-        mainWindowWasVisible = window.isVisible
+        // 编辑器仍在展示时再次触发截图，主窗口已经被隐藏；保留首次抓图前的可见状态。
+        mainWindowWasVisible = mainWindowWasVisible || window.isVisible
         window.orderOut(nil)
+    }
+
+    private func restoreMainWindowAfterCapture() {
+        guard mainWindowWasVisible else { return }
+        mainWindowWasVisible = false
+        MainWindowController.shared.showAndActivate()
     }
 
     private func installActions() {
@@ -76,6 +99,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let window = menu.addItem(withTitle: "窗口截图", action: #selector(captureWindow(_:)), keyEquivalent: "")
         [region, full, window].forEach { $0.target = self }
         menu.addItem(.separator())
+        let history = menu.addItem(withTitle: "截图历史与文字搜索…", action: #selector(showHistory(_:)), keyEquivalent: "")
+        history.target = self
+        history.toolTip = "本机截图历史；在顶部搜索框直接检索截图中的文字"
+        let closePins = menu.addItem(withTitle: "关闭全部贴图", action: #selector(closeAllPins(_:)), keyEquivalent: "")
+        closePins.target = self
+        menu.addItem(.separator())
         let main = menu.addItem(withTitle: "显示主窗口", action: #selector(showMainWindow(_:)), keyEquivalent: "")
         main.target = self
         menu.addItem(.separator())
@@ -91,6 +120,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let appMenu = NSMenu(title: "PinSnap")
         let showItem = appMenu.addItem(withTitle: "显示主窗口", action: #selector(showMainWindow(_:)), keyEquivalent: "")
         showItem.target = self
+        let history = appMenu.addItem(withTitle: "截图历史与文字搜索…", action: #selector(showHistory(_:)), keyEquivalent: "")
+        history.target = self
+        history.toolTip = "本机截图历史；在顶部搜索框直接检索截图中的文字"
+        let closePins = appMenu.addItem(withTitle: "关闭全部贴图", action: #selector(closeAllPins(_:)), keyEquivalent: "")
+        closePins.target = self
         appMenu.addItem(.separator())
         let quitItem = appMenu.addItem(withTitle: "退出 PinSnap", action: #selector(quit(_:)), keyEquivalent: "q")
         quitItem.target = self

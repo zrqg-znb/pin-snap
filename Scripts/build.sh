@@ -19,7 +19,7 @@ if [[ -f "$ROOT/Resources/AppIcon.icns" ]]; then
   cp "$ROOT/Resources/AppIcon.icns" "$RESOURCES/AppIcon.icns"
 fi
 
-swiftc -framework Cocoa -framework ScreenCaptureKit -framework Carbon \
+swiftc -framework Cocoa -framework ScreenCaptureKit -framework Carbon -framework Vision \
   "$ROOT"/Sources/App/*.swift \
   "$ROOT"/Sources/Capture/*.swift \
   "$ROOT"/Sources/Editor/*.swift \

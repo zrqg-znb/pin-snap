@@ -154,11 +154,42 @@ enum SelfTest {
                     NSLog("PinSnap self-test zoom reset: \(coordinator.autotestZoom(factor: 4, atRelative: 0.27, 0.63))")
                 }
             }
+            if ProcessInfo.processInfo.environment["PINSNAP_AUTOTEST_CLOSE_ALL_PINS"] == "1" {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 5.5) {
+                    NSLog("PinSnap self-test close-all: \(coordinator.autotestCloseAllPins())")
+                }
+            }
             DispatchQueue.main.asyncAfter(deadline: .now() + 5.8) {
-                NSLog("PinSnap self-test alive after pin, pinned=\(coordinator.pinnedCount) editorPresent=\(coordinator.hasEditor)")
+                NSLog("PinSnap self-test alive after pin, pinned=\(coordinator.pinnedCount) memory=\(coordinator.pinnedMemoryBytes) editorPresent=\(coordinator.hasEditor)")
                 if ProcessInfo.processInfo.environment["PINSNAP_AUTOTEST_HOLD"] != "1" {
                     NSApp.terminate(nil)
                 }
+            }
+            return
+        }
+        if ProcessInfo.processInfo.environment["PINSNAP_AUTOTEST_CLOSE_ALL_PINS"] == "1"
+            && ProcessInfo.processInfo.environment["PINSNAP_AUTOTEST_PIN"] != "1" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5.5) {
+                NSLog("PinSnap self-test close-all: \(coordinator.autotestCloseAllPins())")
+                NSLog("PinSnap self-test after close-all: pinned=\(coordinator.pinnedCount) memory=\(coordinator.pinnedMemoryBytes)")
+                NSApp.terminate(nil)
+            }
+            return
+        }
+        if ProcessInfo.processInfo.environment["PINSNAP_AUTOTEST_OCR"] == "1" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 4.5) {
+                NSLog("PinSnap self-test toolbar OCR: \(coordinator.autotestToolbarOCR())")
+                NSLog("PinSnap self-test local OCR: \(coordinator.autotestHistoryOCR())")
+                NSLog("PinSnap self-test OCR index/search: \(coordinator.autotestHistoryOCRIndex())")
+                NSApp.terminate(nil)
+            }
+            return
+        }
+        if ProcessInfo.processInfo.environment["PINSNAP_AUTOTEST_HISTORY"] == "1" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 4.5) {
+                NSLog("PinSnap self-test history write: \(coordinator.autotestHistoryWrite())")
+                NSLog("PinSnap self-test history clear: \(coordinator.autotestHistoryClear())")
+                NSApp.terminate(nil)
             }
             return
         }
@@ -169,6 +200,7 @@ enum SelfTest {
             DispatchQueue.main.asyncAfter(deadline: .now() + 5.5) {
                 let pasted = NSPasteboard.general.canReadObject(forClasses: [NSImage.self], options: nil)
                 NSLog("PinSnap self-test alive after copy, clipboardImage=\(pasted) editorPresent=\(coordinator.hasEditor)")
+                NSLog("PinSnap self-test history after copy: \(coordinator.autotestHistoryClear())")
                 NSApp.terminate(nil)
             }
             return

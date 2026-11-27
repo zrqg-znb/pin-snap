@@ -8,12 +8,14 @@ final class CaptureEditorWindow: NSWindow {
     init(snapshot: CaptureSnapshot,
          presetSelection: NSRect?,
          pinController: PinController?,
+         historyStore: ScreenshotHistoryStore?,
          centeredImage: Bool = false,
          onClose: @escaping () -> Void) {
         self.onClose = onClose
         editor = CaptureEditView(snapshot: snapshot,
                                  presetSelection: presetSelection,
                                  pinController: pinController,
+                                 historyStore: historyStore,
                                  centeredImage: centeredImage)
         super.init(contentRect: snapshot.screenFrame, styleMask: [.borderless], backing: .buffered, defer: false)
         setFrame(snapshot.screenFrame, display: true)
@@ -62,6 +64,8 @@ final class CaptureEditorWindow: NSWindow {
         return "copy-ok"
     }
 
+    func autotestExtractText() -> String { editor.autotestExtractText() }
+
     func autotestPin() -> String {
         editor.pinForSelfTest()
         return "pin-ok"
@@ -87,6 +91,12 @@ final class CaptureEditorWindow: NSWindow {
     func autotestPaletteStability() -> String { editor.autotestPaletteStability() }
 
     func dumpViewBitmap(to path: String) -> String { return editor.dumpSelectionView(to: path) }
+
+    func closeSilently() {
+        editor.detachTextInput()
+        orderOut(nil)
+        close()
+    }
 
     private func finish() {
         // 保活到方法结束：onClose() 会清掉协调器对窗口的强引用。
@@ -138,27 +148,28 @@ private final class ToolbarButton: NSButton {
         }
 
         alphaValue = 1
+        // 选中态统一用中性浅灰，不再用蓝色块抢画布注意力。
         if isActiveTool {
-            contentTintColor = .controlAccentColor
-            layer?.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.14).cgColor
+            contentTintColor = .labelColor
+            layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.10).cgColor
             return
         }
 
         switch role {
         case .destructive:
-            contentTintColor = .systemRed
+            contentTintColor = isPointerInside ? .systemRed : .labelColor
             layer?.backgroundColor = isPointerInside
-                ? NSColor.systemRed.withAlphaComponent(0.12).cgColor
+                ? NSColor.systemRed.withAlphaComponent(0.10).cgColor
                 : NSColor.clear.cgColor
         case .confirm:
-            contentTintColor = .systemGreen
+            contentTintColor = isPointerInside ? .systemGreen : .labelColor
             layer?.backgroundColor = isPointerInside
-                ? NSColor.systemGreen.withAlphaComponent(0.12).cgColor
+                ? NSColor.systemGreen.withAlphaComponent(0.10).cgColor
                 : NSColor.clear.cgColor
         default:
             contentTintColor = .labelColor
             layer?.backgroundColor = isPointerInside
-                ? NSColor.labelColor.withAlphaComponent(0.08).cgColor
+                ? NSColor.labelColor.withAlphaComponent(0.07).cgColor
                 : NSColor.clear.cgColor
         }
     }
@@ -175,6 +186,148 @@ private final class ToolbarGrip: NSView {
                 NSBezierPath(ovalIn: NSRect(x: x, y: y, width: 2.5, height: 2.5)).fill()
             }
         }
+    }
+}
+
+/// 统一的样式选择控件。它们不用系统按钮的默认 bezel，避免不同 macOS 版本
+/// 把颜色、粗细按钮画成风格不一致的灰色小方块。
+private class StyleChoiceButton: NSButton {
+    var isSelected = false { didSet { needsDisplay = true } }
+    private var isPointerInside = false { didSet { needsDisplay = true } }
+
+    override var isEnabled: Bool { didSet { needsDisplay = true } }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: bounds,
+                                       options: [.activeAlways, .mouseEnteredAndExited, .inVisibleRect],
+                                       owner: self,
+                                       userInfo: nil))
+    }
+
+    override func mouseEntered(with event: NSEvent) { isPointerInside = true }
+    override func mouseExited(with event: NSEvent) { isPointerInside = false }
+
+    /// 选择态只保留一层很浅的灰色，不画高对比边框；靠控件本体表达选中。
+    func drawSelectionBackground(in rect: NSRect, radius: CGFloat = 6) {
+        if isSelected {
+            NSColor.labelColor.withAlphaComponent(0.08).setFill()
+            NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius).fill()
+        } else if isPointerInside {
+            NSColor.labelColor.withAlphaComponent(0.045).setFill()
+            NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius).fill()
+        }
+    }
+}
+
+private final class StyleSwatchButton: StyleChoiceButton {
+    let swatchColor: NSColor
+
+    init(color: NSColor, target: AnyObject?, action: Selector) {
+        swatchColor = color
+        super.init(frame: .zero)
+        isBordered = false
+        bezelStyle = .regularSquare
+        self.target = target
+        self.action = action
+        translatesAutoresizingMaskIntoConstraints = false
+        widthAnchor.constraint(equalToConstant: 18).isActive = true
+        heightAnchor.constraint(equalToConstant: 28).isActive = true
+        toolTip = "颜色"
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    override func draw(_ dirtyRect: NSRect) {
+        drawSelectionBackground(in: bounds.insetBy(dx: 1, dy: 1), radius: 6)
+        let diameter: CGFloat = 10
+        let swatch = NSRect(x: bounds.midX - diameter / 2,
+                            y: bounds.midY - diameter / 2,
+                            width: diameter, height: diameter)
+        swatchColor.setFill()
+        NSBezierPath(ovalIn: swatch).fill()
+
+        // 彩色圆点不描边；只有白点需要一圈浅灰边缘才能在白工具栏上看见。
+        if swatchColor.isEqual(NSColor.white) {
+            NSColor.separatorColor.withAlphaComponent(0.65).setStroke()
+            let edge = NSBezierPath(ovalIn: swatch.insetBy(dx: 0.5, dy: 0.5))
+            edge.lineWidth = 1
+            edge.stroke()
+        }
+
+        if isSelected {
+            let ring = NSBezierPath(ovalIn: swatch.insetBy(dx: -1.8, dy: -1.8))
+            ring.lineWidth = 1
+            NSColor.labelColor.withAlphaComponent(0.30).setStroke()
+            ring.stroke()
+        }
+    }
+}
+
+private final class StyleLineButton: StyleChoiceButton {
+    let lineWidth: CGFloat
+
+    init(lineWidth: CGFloat, target: AnyObject?, action: Selector) {
+        self.lineWidth = lineWidth
+        super.init(frame: .zero)
+        isBordered = false
+        bezelStyle = .regularSquare
+        self.target = target
+        self.action = action
+        translatesAutoresizingMaskIntoConstraints = false
+        widthAnchor.constraint(equalToConstant: 26).isActive = true
+        heightAnchor.constraint(equalToConstant: 28).isActive = true
+        toolTip = "线宽 \(Int(lineWidth)) px"
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    override func draw(_ dirtyRect: NSRect) {
+        drawSelectionBackground(in: bounds.insetBy(dx: 1, dy: 1), radius: 6)
+        NSColor.labelColor.withAlphaComponent(isEnabled ? 0.78 : 0.22).setStroke()
+        let path = NSBezierPath()
+        path.lineWidth = min(max(lineWidth * 0.6, 1.2), 4)
+        path.lineCapStyle = .round
+        path.move(to: NSPoint(x: 8, y: bounds.midY))
+        path.line(to: NSPoint(x: bounds.maxX - 8, y: bounds.midY))
+        path.stroke()
+    }
+}
+
+private final class StyleFontButton: StyleChoiceButton {
+    let fontSize: CGFloat
+
+    init(fontSize: CGFloat, target: AnyObject?, action: Selector) {
+        self.fontSize = fontSize
+        super.init(frame: .zero)
+        isBordered = false
+        bezelStyle = .regularSquare
+        self.target = target
+        self.action = action
+        translatesAutoresizingMaskIntoConstraints = false
+        widthAnchor.constraint(equalToConstant: 34).isActive = true
+        heightAnchor.constraint(equalToConstant: 28).isActive = true
+        toolTip = "字号 \(Int(fontSize)) pt"
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    override func draw(_ dirtyRect: NSRect) {
+        drawSelectionBackground(in: bounds.insetBy(dx: 1, dy: 1), radius: 6)
+        let primary = NSColor.labelColor.withAlphaComponent(isEnabled ? 0.90 : 0.24)
+        let secondary = NSColor.labelColor.withAlphaComponent(isEnabled ? 0.55 : 0.18)
+        let title = NSMutableAttributedString(string: "A", attributes: [
+            .font: NSFont.systemFont(ofSize: 12, weight: .semibold),
+            .foregroundColor: primary
+        ])
+        title.append(NSAttributedString(string: " \(Int(fontSize))", attributes: [
+            .font: NSFont.systemFont(ofSize: 9, weight: .medium),
+            .foregroundColor: secondary
+        ]))
+        let size = title.size()
+        title.draw(at: NSPoint(x: bounds.midX - size.width / 2,
+                               y: bounds.midY - size.height / 2))
     }
 }
 
@@ -202,6 +355,7 @@ final class CaptureEditView: NSView, NSTextFieldDelegate {
     private var baseDrawRect: NSRect
     private var scale: CGFloat
     private let pinController: PinController?
+    private let historyStore: ScreenshotHistoryStore?
     private var phase: Phase
     private var selection: NSRect
     private var startPoint: NSPoint?
@@ -214,24 +368,35 @@ final class CaptureEditView: NSView, NSTextFieldDelegate {
     private var draftRect: NSRect?
     private var draftArrow: (start: NSPoint, end: NSPoint)?
     private var nextNumber = 1
+
+    private func refreshNextNumber() {
+        let used = Set(annotations.compactMap { annotation -> Int? in
+            guard case .number(let value) = annotation.kind else { return nil }
+            return value
+        })
+        var candidate = 1
+        while used.contains(candidate) { candidate += 1 }
+        nextNumber = candidate
+    }
     private var sampler: PixelSampler?
     private var textField: NSTextField?
+    /// 一个白色面板承载两行：主工具栏（短）+ 二级样式栏（居中、更窄）。
+    private let toolbarPanel = NSView()
     private let toolbar = NSView()
     private let toolbarStack = NSStackView()
+    private let styleStack = NSStackView()
+    private let rowSeparator = NSView()
+    private let inlineLineGroup = NSStackView()
+    private let inlineColorGroup = NSStackView()
+    private let inlineFontGroup = NSStackView()
+    private var inlineColorButtons: [StyleSwatchButton] = []
+    private var inlineLineButtons: [StyleLineButton] = []
+    private var inlineFontButtons: [StyleFontButton] = []
     private var toolButtons: [ToolbarButton] = []
-    private let stylePopover = NSPopover()
-    // 面板只构建一次：反复替换 contentViewController 会让 NSPopover 重新定位，
-    // 表现就是「点一下颜色，面板跳到屏幕顶上」。选样式只更新控件状态，不动视图树。
-    private let paletteContainer = NSView()
-    private let paletteDotGroup = NSStackView()
-    private var paletteColorButtons: [NSButton] = []
-    private var paletteDotButtons: [NSButton] = []
-    private var paletteFontPopup: NSPopUpButton?
+    /// 主栏只放工具和动作；样式放在下方二级栏，避免主栏被拉得很宽。
     private var toolbarBuilt = false
-    private var paletteBuilt = false
-    private var paletteVC: NSViewController?
-    // 参考图色板顺序：红、橙、绿、蓝、黑、灰、白。
-    private let presetColors: [NSColor] = [.systemRed, .systemOrange, .systemGreen, .systemBlue, .black, .systemGray, .white]
+    // 色板顺序：红、橙、绿、蓝、黑、白。
+    private let presetColors: [NSColor] = [.systemRed, .systemOrange, .systemGreen, .systemBlue, .black, .white]
     private let presetLineWidths: [CGFloat] = [2, 4, 6]
     private let presetTextSizes: [CGFloat] = [18, 22, 28]
     private var annotationColor: NSColor = .systemRed
@@ -243,6 +408,11 @@ final class CaptureEditView: NSView, NSTextFieldDelegate {
         let fontSize: CGFloat
     }
     private var pendingTextStyle: PendingTextStyle?
+    /// 复制、保存、固定最终只能完成一次：工具栏连点或 Return 重复触发时，
+    /// 不应往本地历史写入多个完全相同的成品。
+    private var isCompletingOutput = false
+    /// OCR 是异步的，识别中禁止重复点击，避免多次写剪贴板。
+    private var isExtractingText = false
     private var notice: String?
     /// 底图还没回来时窗口保持全透明：让用户直接看到当前桌面，
     /// 而不是一块「铺了深色底 + 遮罩、但底下什么都没有」的黑屏。
@@ -251,8 +421,9 @@ final class CaptureEditView: NSView, NSTextFieldDelegate {
     private var dimProgress: CGFloat = 1
     private var dimTimer: Timer?
 
-    init(snapshot: CaptureSnapshot, presetSelection: NSRect?, pinController: PinController?, centeredImage: Bool = false) {
+    init(snapshot: CaptureSnapshot, presetSelection: NSRect?, pinController: PinController?, historyStore: ScreenshotHistoryStore?, centeredImage: Bool = false) {
         self.pinController = pinController
+        self.historyStore = historyStore
         baseCGImage = snapshot.image
         // 用 pointSize（pixelSize/scale）而不是 image.width：占位底图只有 1×1 像素，
         // 若按图片宽度反推，baseDrawRect 会缩成 1×1，选区 intersection 后直接被裁空。
@@ -289,7 +460,7 @@ final class CaptureEditView: NSView, NSTextFieldDelegate {
             rebuildSampler()
             positionToolbar()
         }
-        toolbar.isHidden = phase == .selecting
+        toolbarPanel.isHidden = phase == .selecting
         needsDisplay = true
     }
 
@@ -318,10 +489,11 @@ final class CaptureEditView: NSView, NSTextFieldDelegate {
     /// 所有手写圆角/边框的 layer 都要按屏幕倍率栅格化，否则 Retina 上圆角是锯齿的。
     private func updateLayerScales() {
         let scale = window?.backingScaleFactor ?? 2
-        toolbar.layer?.contentsScale = scale
+        toolbarPanel.layer?.contentsScale = scale
         toolButtons.forEach { $0.layer?.contentsScale = scale }
-        paletteColorButtons.forEach { $0.layer?.contentsScale = scale }
-        paletteDotButtons.forEach { $0.layer?.contentsScale = scale }
+        inlineColorButtons.forEach { $0.layer?.contentsScale = scale }
+        inlineLineButtons.forEach { $0.layer?.contentsScale = scale }
+        inlineFontButtons.forEach { $0.layer?.contentsScale = scale }
     }
 
     override func resetCursorRects() {
@@ -375,43 +547,32 @@ final class CaptureEditView: NSView, NSTextFieldDelegate {
     }
 
     private func buildToolbar() {
-        // 参考图：白色胶囊、细阴影、无粗边框。
-        toolbar.wantsLayer = true
-        toolbar.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
-        // 圆角锯齿的元凶：CALayer 默认 contentsScale = 1，Retina 上按 1x 栅格化。
-        toolbar.layer?.contentsScale = window?.backingScaleFactor ?? 2
-        toolbar.layer?.cornerRadius = 11
-        toolbar.layer?.borderWidth = 0.5
-        toolbar.layer?.borderColor = NSColor.separatorColor.withAlphaComponent(0.45).cgColor
-        toolbar.layer?.shadowColor = NSColor.black.withAlphaComponent(0.13).cgColor
-        toolbar.layer?.shadowOpacity = 1
-        toolbar.layer?.shadowRadius = 10
-        toolbar.layer?.shadowOffset = NSSize(width: 0, height: -2)
-        addSubview(toolbar)
+        // 白色面板只是一层底：无描边、无阴影，避免深色底图上出现一圈黑边。
+        toolbarPanel.wantsLayer = true
+        toolbarPanel.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
+        toolbarPanel.layer?.contentsScale = window?.backingScaleFactor ?? 2
+        toolbarPanel.layer?.cornerRadius = 11
+        toolbarPanel.layer?.borderWidth = 0
+        toolbarPanel.layer?.shadowOpacity = 0
+        addSubview(toolbarPanel)
 
+        toolbar.translatesAutoresizingMaskIntoConstraints = false
         let stack = toolbarStack
         stack.orientation = .horizontal
-        stack.spacing = 1
+        stack.spacing = 2
         stack.alignment = .centerY
         stack.translatesAutoresizingMaskIntoConstraints = false
         toolbar.addSubview(stack)
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: toolbar.leadingAnchor, constant: 6),
-            stack.trailingAnchor.constraint(equalTo: toolbar.trailingAnchor, constant: -6),
+            stack.leadingAnchor.constraint(equalTo: toolbar.leadingAnchor, constant: 7),
+            stack.trailingAnchor.constraint(equalTo: toolbar.trailingAnchor, constant: -7),
             stack.topAnchor.constraint(equalTo: toolbar.topAnchor, constant: 5),
             stack.bottomAnchor.constraint(equalTo: toolbar.bottomAnchor, constant: -5)
         ])
 
-        // 最左侧拖拽把手（视觉元素；工具栏本身跟随选区定位）。
-        let grip = ToolbarGrip()
-        grip.translatesAutoresizingMaskIntoConstraints = false
-        grip.widthAnchor.constraint(equalToConstant: 18).isActive = true
-        grip.heightAnchor.constraint(equalToConstant: 30).isActive = true
-        stack.addArrangedSubview(grip)
-
         for item in AnnotationTool.allCases {
             let button = toolbarButton(item.symbol,
-                                       tooltip: "\(item.title) · 点按可设置颜色与\(item == .text ? "字号" : "粗细")",
+                                       tooltip: item.title,
                                        action: #selector(selectTool(_:)),
                                        role: .tool)
             button.tag = item.rawValue
@@ -419,6 +580,10 @@ final class CaptureEditView: NSView, NSTextFieldDelegate {
             stack.addArrangedSubview(button)
         }
 
+        stack.addArrangedSubview(toolbarButton("text.viewfinder",
+                                               tooltip: "提取截图文字（本机 OCR）",
+                                               action: #selector(extractText(_:)),
+                                               role: .action))
         stack.addArrangedSubview(separator())
 
         let undoButton = toolbarButton("arrow.uturn.backward", tooltip: "撤销（⌘Z）", action: #selector(undo(_:)), role: .action)
@@ -427,26 +592,92 @@ final class CaptureEditView: NSView, NSTextFieldDelegate {
         redoButton.identifier = NSUserInterfaceItemIdentifier("redo")
         stack.addArrangedSubview(undoButton)
         stack.addArrangedSubview(redoButton)
-
         stack.addArrangedSubview(separator())
-
-        // 参考图里的下载图标 = 保存 PNG；Pin 与复制放在溢出位置，避免主栏拥挤。
         stack.addArrangedSubview(toolbarButton("square.and.arrow.down", tooltip: "保存为 PNG（⌘S）", action: #selector(saveImage(_:)), role: .action))
         stack.addArrangedSubview(toolbarButton("pin", tooltip: "钉住到桌面", action: #selector(pinImage(_:)), role: .action))
-
         stack.addArrangedSubview(separator())
-
         stack.addArrangedSubview(toolbarButton("xmark", tooltip: "取消（Esc）", action: #selector(cancel(_:)), role: .destructive))
         stack.addArrangedSubview(toolbarButton("checkmark", tooltip: "复制并退出（Return）", action: #selector(copyImage(_:)), role: .confirm))
 
+        // 二级样式栏：比主栏窄，居中放在主栏下方。
+        styleStack.orientation = .horizontal
+        styleStack.alignment = .centerY
+        styleStack.spacing = 1
+        styleStack.translatesAutoresizingMaskIntoConstraints = false
+        buildInlineStyleControls(into: styleStack)
+
+        rowSeparator.wantsLayer = true
+        rowSeparator.layer?.backgroundColor = NSColor.separatorColor.withAlphaComponent(0.22).cgColor
+        rowSeparator.translatesAutoresizingMaskIntoConstraints = false
+
+        toolbarPanel.addSubview(toolbar)
+        toolbarPanel.addSubview(rowSeparator)
+        toolbarPanel.addSubview(styleStack)
+        NSLayoutConstraint.activate([
+            toolbar.topAnchor.constraint(equalTo: toolbarPanel.topAnchor, constant: 5),
+            toolbar.leadingAnchor.constraint(equalTo: toolbarPanel.leadingAnchor, constant: 7),
+            toolbar.trailingAnchor.constraint(equalTo: toolbarPanel.trailingAnchor, constant: -7),
+            toolbar.bottomAnchor.constraint(equalTo: rowSeparator.topAnchor, constant: -4),
+
+            rowSeparator.leadingAnchor.constraint(equalTo: toolbarPanel.leadingAnchor, constant: 10),
+            rowSeparator.trailingAnchor.constraint(equalTo: toolbarPanel.trailingAnchor, constant: -10),
+            rowSeparator.heightAnchor.constraint(equalToConstant: 1),
+
+            styleStack.centerXAnchor.constraint(equalTo: toolbarPanel.centerXAnchor),
+            styleStack.topAnchor.constraint(equalTo: rowSeparator.bottomAnchor, constant: 3),
+            styleStack.bottomAnchor.constraint(equalTo: toolbarPanel.bottomAnchor, constant: -5)
+        ])
+
         refreshToolbarState()
+    }
+
+    private func buildInlineStyleControls(into stack: NSStackView) {
+        func colorLabel(_ color: NSColor) -> String {
+            let names = ["红", "橙", "绿", "蓝", "黑", "白"]
+            return presetColors.firstIndex(where: { $0.isEqual(color) }).map { names[$0] } ?? "自定"
+        }
+
+        for group in [inlineLineGroup, inlineColorGroup, inlineFontGroup] {
+            group.orientation = .horizontal
+            group.alignment = .centerY
+            group.spacing = 1
+            group.translatesAutoresizingMaskIntoConstraints = false
+        }
+
+        for (index, width) in presetLineWidths.enumerated() {
+            let control = StyleLineButton(lineWidth: width, target: self, action: #selector(selectLineWidth(_:)))
+            control.tag = index
+            inlineLineButtons.append(control)
+            inlineLineGroup.addArrangedSubview(control)
+        }
+        for (index, size) in presetTextSizes.enumerated() {
+            let control = StyleFontButton(fontSize: size, target: self, action: #selector(selectFontSize(_:)))
+            control.tag = index
+            inlineFontButtons.append(control)
+            inlineFontGroup.addArrangedSubview(control)
+        }
+        for (index, color) in presetColors.enumerated() {
+            let control = StyleSwatchButton(color: color, target: self, action: #selector(selectColor(_:)))
+            control.tag = index
+            control.toolTip = "\(colorLabel(color))色"
+            inlineColorButtons.append(control)
+            inlineColorGroup.addArrangedSubview(control)
+        }
+
+        // 尺度组与颜色组之间留一条细分隔线；颜色始终可见。
+        stack.addArrangedSubview(inlineLineGroup)
+        stack.addArrangedSubview(inlineFontGroup)
+        stack.addArrangedSubview(separator())
+        stack.addArrangedSubview(inlineColorGroup)
     }
 
     private func toolbarButton(_ symbol: String, tooltip: String, action: Selector, role: ToolbarButton.Role) -> ToolbarButton {
         let button = ToolbarButton()
         // 参考图是细线图标（约 16-17pt、regular 字重），不是加粗实心。
         let configuration = NSImage.SymbolConfiguration(pointSize: 16, weight: .regular)
-        button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: tooltip)?.withSymbolConfiguration(configuration)
+        let baseImage = NSImage(systemSymbolName: symbol, accessibilityDescription: tooltip)
+            ?? NSImage(systemSymbolName: "doc.text", accessibilityDescription: tooltip)
+        button.image = baseImage?.withSymbolConfiguration(configuration)
         button.imageScaling = .scaleProportionallyDown
         button.isBordered = false
         button.bezelStyle = .regularSquare
@@ -455,8 +686,8 @@ final class CaptureEditView: NSView, NSTextFieldDelegate {
         button.target = self
         button.action = action
         button.translatesAutoresizingMaskIntoConstraints = false
-        button.widthAnchor.constraint(equalToConstant: 30).isActive = true
-        button.heightAnchor.constraint(equalToConstant: 30).isActive = true
+        button.widthAnchor.constraint(equalToConstant: 28).isActive = true
+        button.heightAnchor.constraint(equalToConstant: 28).isActive = true
         button.layer?.contentsScale = window?.backingScaleFactor ?? 2
         button.refreshAppearance()
         return button
@@ -465,10 +696,10 @@ final class CaptureEditView: NSView, NSTextFieldDelegate {
     private func separator() -> NSView {
         let view = NSView()
         view.wantsLayer = true
-        view.layer?.backgroundColor = NSColor.separatorColor.withAlphaComponent(0.5).cgColor
+        view.layer?.backgroundColor = NSColor.separatorColor.withAlphaComponent(0.30).cgColor
         view.translatesAutoresizingMaskIntoConstraints = false
         view.widthAnchor.constraint(equalToConstant: 1).isActive = true
-        view.heightAnchor.constraint(equalToConstant: 18).isActive = true
+        view.heightAnchor.constraint(equalToConstant: 14).isActive = true
         return view
     }
 
@@ -476,6 +707,18 @@ final class CaptureEditView: NSView, NSTextFieldDelegate {
         for button in toolButtons {
             button.isActiveTool = button.tag == tool.rawValue
             button.refreshAppearance()
+        }
+        inlineLineGroup.isHidden = tool == .text
+        inlineFontGroup.isHidden = tool != .text
+        inlineColorGroup.isHidden = false
+        for (index, button) in inlineColorButtons.enumerated() {
+            button.isSelected = presetColors.indices.contains(index) && presetColors[index].isEqual(annotationColor)
+        }
+        for (index, button) in inlineLineButtons.enumerated() {
+            button.isSelected = presetLineWidths.indices.contains(index) && presetLineWidths[index] == annotationLineWidth
+        }
+        for (index, button) in inlineFontButtons.enumerated() {
+            button.isSelected = presetTextSizes.indices.contains(index) && presetTextSizes[index] == annotationTextFontSize
         }
         if let undoButton = toolbarStack.arrangedSubviews.compactMap({ $0 as? ToolbarButton }).first(where: { $0.identifier?.rawValue == "undo" }) {
             undoButton.isEnabled = !annotations.isEmpty
@@ -485,204 +728,63 @@ final class CaptureEditView: NSView, NSTextFieldDelegate {
         }
     }
 
-    /// 点工具按钮：切换工具，并在按钮正下方弹出参考图那种样式面板。
-    private func presentStylePopover(for toolButton: NSButton) {
-        ensurePalette()
-        syncPaletteState()
-        // 先落定工具栏尺寸，避免面板锚点算在旧 frame 上。
-        toolbar.layoutSubtreeIfNeeded()
-        if stylePopover.isShown {
-            // 已显示时换锚点必须重开，否则面板停在旧按钮下面。
-            stylePopover.performClose(nil)
-            DispatchQueue.main.async { [weak self, weak toolButton] in
-                guard let self, let toolButton else { return }
-                self.stylePopover.show(relativeTo: toolButton.bounds, of: toolButton, preferredEdge: .minY)
-            }
-        } else {
-            stylePopover.show(relativeTo: toolButton.bounds, of: toolButton, preferredEdge: .minY)
-        }
-    }
-
-    /// 构建一次面板。故意不给容器画背景和圆角——交给系统 NSPopover 渲染，
-    /// 圆角和箭头都是原生抗锯齿，比手写 CALayer 圆角平滑得多。
-    private func ensurePalette() {
-        guard !paletteBuilt else { return }
-        paletteBuilt = true
-
-        let row = NSStackView()
-        row.orientation = .horizontal
-        row.alignment = .centerY
-        row.spacing = 5
-        row.translatesAutoresizingMaskIntoConstraints = false
-        paletteContainer.addSubview(row)
-        NSLayoutConstraint.activate([
-            row.leadingAnchor.constraint(equalTo: paletteContainer.leadingAnchor, constant: 12),
-            row.trailingAnchor.constraint(equalTo: paletteContainer.trailingAnchor, constant: -12),
-            row.topAnchor.constraint(equalTo: paletteContainer.topAnchor, constant: 9),
-            row.bottomAnchor.constraint(equalTo: paletteContainer.bottomAnchor, constant: -9)
-        ])
-
-        // 粗细圆点组（形状类工具用）
-        paletteDotGroup.orientation = .horizontal
-        paletteDotGroup.alignment = .centerY
-        paletteDotGroup.spacing = 3
-        for (index, width) in presetLineWidths.enumerated() {
-            let dot = NSButton(title: "", target: self, action: #selector(selectLineWidth(_:)))
-            dot.tag = index
-            dot.isBordered = false
-            dot.bezelStyle = .regularSquare
-            dot.wantsLayer = true
-            dot.layer?.contentsScale = window?.backingScaleFactor ?? 2
-            dot.layer?.cornerRadius = 8
-            let diameter: CGFloat = [5, 8, 11][index]
-            let dotImage = NSImage(systemSymbolName: "circle.fill",
-                                   accessibilityDescription: "\(Int(width))px")
-            dot.image = dotImage?.withSymbolConfiguration(.init(pointSize: diameter, weight: .semibold))
-            dot.toolTip = "\(Int(width)) px"
-            dot.translatesAutoresizingMaskIntoConstraints = false
-            dot.widthAnchor.constraint(equalToConstant: 26).isActive = true
-            dot.heightAnchor.constraint(equalToConstant: 28).isActive = true
-            paletteDotButtons.append(dot)
-            paletteDotGroup.addArrangedSubview(dot)
-        }
-        row.addArrangedSubview(paletteDotGroup)
-
-        // 字号下拉（文字工具用），与圆点组互斥显示；宽度对齐圆点组，保证两种模式同宽。
-        let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 84, height: 24), pullsDown: false)
-        for size in presetTextSizes { popup.addItem(withTitle: "\(Int(size))pt") }
-        popup.target = self
-        popup.action = #selector(selectFontSize(_:))
-        popup.font = .systemFont(ofSize: 12, weight: .medium)
-        popup.controlSize = .small
-        popup.toolTip = "文字字号"
-        popup.translatesAutoresizingMaskIntoConstraints = false
-        popup.widthAnchor.constraint(equalToConstant: 84).isActive = true
-        paletteFontPopup = popup
-        row.addArrangedSubview(popup)
-
-        let divider = NSView()
-        divider.wantsLayer = true
-        divider.layer?.backgroundColor = NSColor.separatorColor.withAlphaComponent(0.55).cgColor
-        divider.translatesAutoresizingMaskIntoConstraints = false
-        divider.widthAnchor.constraint(equalToConstant: 1).isActive = true
-        divider.heightAnchor.constraint(equalToConstant: 18).isActive = true
-        row.addArrangedSubview(divider)
-
-        for (index, color) in presetColors.enumerated() {
-            let button = makeColorSwatch(color, tag: index)
-            paletteColorButtons.append(button)
-            row.addArrangedSubview(button)
-        }
-
-        let vc = NSViewController()
-        vc.view = paletteContainer
-        // 先按当前工具定好圆点组/下拉的显隐，再算尺寸；
-        // 否则会把隐藏控件也计入宽度，面板中间多出一段空白。
-        syncPaletteState()
-        let fit = paletteFittingSize()
-        vc.preferredContentSize = NSSize(width: ceil(fit.width), height: ceil(fit.height))
-        paletteVC = vc
-        stylePopover.contentViewController = vc
-        stylePopover.behavior = .transient
-        stylePopover.animates = false
-    }
-
-    /// 让面板容器在临时 frame 下求解一次约束，得到内容的真实尺寸。
-    private func paletteFittingSize() -> NSSize {
-        paletteContainer.frame = NSRect(x: 0, y: 0, width: 320, height: 46)
-        paletteContainer.layoutSubtreeIfNeeded()
-        return paletteContainer.fittingSize
-    }
-
-    /// 原地同步面板状态：选颜色/粗细/字号后调用，绝不重建视图，面板位置因此纹丝不动。
-    private func syncPaletteState() {
-        let usesTextSize = tool == .text
-        paletteDotGroup.isHidden = usesTextSize
-        paletteFontPopup?.isHidden = !usesTextSize
-
-        for (index, button) in paletteColorButtons.enumerated() {
-            guard presetColors.indices.contains(index) else { continue }
-            let color = presetColors[index]
-            let selected = color.isEqual(annotationColor)
-            button.layer?.borderWidth = selected ? 2 : 0.5
-            button.layer?.borderColor = selected
-                ? NSColor.controlAccentColor.cgColor
-                : NSColor.separatorColor.withAlphaComponent(0.5).cgColor
-            button.image = selected
-                ? NSImage(systemSymbolName: "checkmark", accessibilityDescription: "已选中")?
-                    .withSymbolConfiguration(.init(pointSize: 11, weight: .bold))
-                : nil
-            let resolved = color.usingColorSpace(.deviceRGB)
-            button.contentTintColor = (resolved?.brightnessComponent ?? 0.5) < 0.55 ? .white : .black
-        }
-
-        for (index, dot) in paletteDotButtons.enumerated() {
-            guard presetLineWidths.indices.contains(index) else { continue }
-            let selected = presetLineWidths[index] == annotationLineWidth
-            dot.layer?.backgroundColor = selected
-                ? NSColor.controlAccentColor.withAlphaComponent(0.13).cgColor
-                : NSColor.clear.cgColor
-            dot.contentTintColor = selected ? .controlAccentColor : .secondaryLabelColor
-        }
-
-        paletteFontPopup?.selectItem(at: presetTextSizes.firstIndex(of: annotationTextFontSize) ?? 1)
-        paletteContainer.layoutSubtreeIfNeeded()
-    }
-
-    private func colorName(_ color: NSColor) -> String {
-        let names = ["红", "橙", "绿", "蓝", "黑", "灰", "白"]
-        return presetColors.enumerated().first(where: { $0.element.isEqual(color) }).map { names[$0.offset] } ?? "自定"
-    }
-
-    private func makeColorSwatch(_ color: NSColor, tag: Int) -> NSButton {
-        let button = NSButton(title: "", target: self, action: #selector(selectColor(_:)))
-        button.tag = tag
-        button.isBordered = false
-        button.bezelStyle = .regularSquare
-        button.wantsLayer = true
-        button.layer?.backgroundColor = color.cgColor
-        button.layer?.cornerRadius = 5
-        button.layer?.contentsScale = window?.backingScaleFactor ?? 2
-        button.toolTip = "\(colorName(color))色"
-        button.translatesAutoresizingMaskIntoConstraints = false
-        button.widthAnchor.constraint(equalToConstant: 21).isActive = true
-        button.heightAnchor.constraint(equalToConstant: 21).isActive = true
-        return button
-    }
-
     @objc private func selectColor(_ sender: NSButton) {
         guard presetColors.indices.contains(sender.tag) else { return }
         annotationColor = presetColors[sender.tag]
-        syncPaletteState()
+        refreshToolbarState()
         needsDisplay = true
     }
 
     @objc private func selectLineWidth(_ sender: NSButton) {
         guard presetLineWidths.indices.contains(sender.tag) else { return }
         annotationLineWidth = presetLineWidths[sender.tag]
-        syncPaletteState()
+        refreshToolbarState()
         needsDisplay = true
     }
 
-    @objc private func selectFontSize(_ sender: NSPopUpButton) {
-        guard presetTextSizes.indices.contains(sender.indexOfSelectedItem) else { return }
-        annotationTextFontSize = presetTextSizes[sender.indexOfSelectedItem]
-        syncPaletteState()
+    @objc private func selectFontSize(_ sender: NSButton) {
+        guard presetTextSizes.indices.contains(sender.tag) else { return }
+        annotationTextFontSize = presetTextSizes[sender.tag]
+        refreshToolbarState()
         needsDisplay = true
+    }
+
+    /// 工具栏 OCR：直接对当前选区的最终图做本机识别，并把文字复制到剪贴板。
+    /// 不会结束截图会话，用户仍可继续标注；历史里的 OCR 索引仍独立保留。
+    @objc private func extractText(_ sender: Any?) {
+        guard !isExtractingText, let cgImage = renderSelectionCGImage() else { return }
+        isExtractingText = true
+        showNotice("正在识别文字…")
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self, cgImage] in
+            let text = TextRecognitionService.recognizeText(in: cgImage)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.isExtractingText = false
+                guard !text.isEmpty else {
+                    self.showNotice("未识别到文字")
+                    return
+                }
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.writeObjects([text as NSString])
+                self.showNotice("已提取文字并复制（\(text.count) 字）")
+            }
+        }
     }
 
     private func positionToolbar() {
-        guard phase == .editing, !selection.isEmpty, !toolbar.isHidden else { return }
-        toolbar.layoutSubtreeIfNeeded()
-        // 宽度跟着内容走。之前硬编码下限 500，内容只有 ~410，右侧就多出一大截空白。
-        let width = ceil(toolbarStack.fittingSize.width) + 14
-        let height = ceil(toolbarStack.fittingSize.height) + 10
+        guard phase == .editing, !selection.isEmpty, !toolbarPanel.isHidden else { return }
+        toolbarPanel.layoutSubtreeIfNeeded()
+        let fit = toolbarPanel.fittingSize
+        let width = ceil(fit.width)
+        let height = ceil(fit.height)
         var y = selection.maxY + 8
         if y + height > bounds.height { y = selection.minY - height - 8 }
         if y < 0 { y = max(bounds.height - height - 8, 0) }
         let x = min(max(selection.midX - width / 2, 8), max(bounds.width - width - 8, 8))
         let frame = NSRect(x: x, y: y, width: width, height: height)
-        if toolbar.frame != frame { toolbar.frame = frame }
+        if toolbarPanel.frame != frame { toolbarPanel.frame = frame }
     }
 
     private func rebuildSampler() {
@@ -757,10 +859,17 @@ final class CaptureEditView: NSView, NSTextFieldDelegate {
                                     samplerOrigin: selection.origin, scale: scale)
         }
         if let draftRect {
-            let path = NSBezierPath(rect: draftRect)
-            path.lineWidth = annotationLineWidth
-            annotationColor.setStroke()
-            path.stroke()
+            let inset = annotationLineWidth / 2
+            let rect = draftRect.insetBy(dx: inset, dy: inset).integral
+            if rect.width > 0, rect.height > 0 {
+                let path = NSBezierPath(roundedRect: rect,
+                                        xRadius: min(4, rect.width / 5),
+                                        yRadius: min(4, rect.height / 5))
+                path.lineWidth = annotationLineWidth
+                path.lineJoinStyle = .round
+                annotationColor.setStroke()
+                path.stroke()
+            }
         }
         if let draftArrow {
             AnnotationRenderer.drawArrow(from: draftArrow.start, to: draftArrow.end,
@@ -849,8 +958,6 @@ final class CaptureEditView: NSView, NSTextFieldDelegate {
     }
 
     override func mouseDown(with event: NSEvent) {
-        // 样式面板是 transient：点画布时关掉，避免挡住正在标注的位置。
-        if stylePopover.isShown { stylePopover.performClose(nil) }
         let point = convert(event.locationInWindow, from: nil)
         if phase == .selecting {
             startPoint = point
@@ -984,7 +1091,7 @@ final class CaptureEditView: NSView, NSTextFieldDelegate {
     private func enterEditing() {
         phase = .editing
         ensureToolbar()
-        toolbar.isHidden = false
+        toolbarPanel.isHidden = false
         rebuildSampler()
         positionToolbar()
         needsLayout = true
@@ -1077,22 +1184,18 @@ final class CaptureEditView: NSView, NSTextFieldDelegate {
         return false
     }
 
+    /// 点击仅切换工具。样式控件直接固定在同一条工具栏上，不再弹出第二层面板。
     @objc private func selectTool(_ sender: NSButton) {
         guard let selected = AnnotationTool(rawValue: sender.tag) else { return }
-        let sameTool = tool == selected
         tool = selected
         refreshToolbarState()
-        if sameTool && stylePopover.isShown {
-            stylePopover.performClose(sender)
-        } else {
-            presentStylePopover(for: sender)
-        }
+        positionToolbar()
     }
 
     @objc private func undo(_ sender: Any?) {
         guard let last = annotations.popLast() else { return }
         redoStack.append(last)
-        if case .number = last.kind { nextNumber = max(1, nextNumber - 1) }
+        refreshNextNumber()
         refreshToolbarState()
         needsDisplay = true
     }
@@ -1100,6 +1203,7 @@ final class CaptureEditView: NSView, NSTextFieldDelegate {
     @objc private func redo(_ sender: Any?) {
         guard let last = redoStack.popLast() else { return }
         annotations.append(last)
+        refreshNextNumber()
         refreshToolbarState()
         needsDisplay = true
     }
@@ -1107,37 +1211,71 @@ final class CaptureEditView: NSView, NSTextFieldDelegate {
     @objc private func cancel(_ sender: Any?) { finish() }
 
     @objc private func copyImage(_ sender: Any?) {
-        guard let image = renderSelection() else { return }
+        guard !isCompletingOutput, let image = renderSelection() else { return }
+        isCompletingOutput = true
         NSPasteboard.general.clearContents()
         NSPasteboard.general.writeObjects([image])
+        historyStore?.add(image)
         showNotice("已复制到剪贴板")
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { self.finish() }
     }
 
     @objc private func saveImage(_ sender: Any?) {
-        guard let cgImage = renderSelectionCGImage(), let window else { return }
+        guard !isCompletingOutput, let cgImage = renderSelectionCGImage(), let window else { return }
+        isCompletingOutput = true
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.png]
         panel.nameFieldStringValue = "PinSnap-\(Int(Date().timeIntervalSince1970)).png"
         panel.beginSheetModal(for: window) { [weak self] response in
-            guard response == .OK, let url = panel.url else { return }
+            guard response == .OK, let url = panel.url else {
+                self?.isCompletingOutput = false
+                return
+            }
             let rep = NSBitmapImageRep(cgImage: cgImage)
-            guard let data = rep.representation(using: .png, properties: [:]) else { return }
+            guard let data = rep.representation(using: .png, properties: [:]) else {
+                self?.isCompletingOutput = false
+                return
+            }
             do {
                 try data.write(to: url, options: .atomic)
+                self?.historyStore?.add(NSImage(cgImage: cgImage,
+                                                 size: NSSize(width: CGFloat(cgImage.width),
+                                                              height: CGFloat(cgImage.height))))
                 self?.showNotice("已保存")
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { self?.finish() }
             } catch {
-                NSSound.beep()
+                self?.isCompletingOutput = false
+                self?.showSaveError(error)
             }
         }
     }
 
+    private func showSaveError(_ error: Error) {
+        let nsError = error as NSError
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "无法保存 PNG"
+        alert.informativeText = "请确认目标文件夹可写且磁盘空间充足。\n\n错误：\(nsError.localizedDescription)"
+        alert.addButton(withTitle: "好")
+        if let window {
+            alert.beginSheetModal(for: window)
+        } else {
+            alert.runModal()
+        }
+    }
+
     @objc private func pinImage(_ sender: Any?) {
-        guard let image = renderSelection() else { return }
+        guard !isCompletingOutput, let image = renderSelection() else { return }
+        isCompletingOutput = true
         // 固定到截图所在的那块屏幕，而不是「当前主屏」。
-        pinController?.pin(image, on: window?.screen)
-        finish()
+        historyStore?.add(image)
+        let evicted = pinController?.pin(image, on: window?.screen) ?? 0
+        if evicted > 0 {
+            showNotice("已固定；为控制内存已关闭最早的 \(evicted) 张")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in self?.finish() }
+        } else {
+            finish()
+        }
     }
 
     private func finish() {
@@ -1189,45 +1327,39 @@ final class CaptureEditView: NSView, NSTextFieldDelegate {
                            pressure: 1)
     }
 
-    /// 自测：弹出面板 → 换色 → 面板位置必须不变（防回归：替换 contentViewController 导致的跳位）。
+    /// 自测：样式内嵌后，切换颜色不应改变工具栏尺寸或位置。
     func autotestPaletteStability() -> String {
-        guard phase == .editing, let firstTool = toolButtons.first else { return "no-editor" }
+        guard phase == .editing else { return "no-editor" }
         tool = .rectangle
         refreshToolbarState()
-        presentStylePopover(for: firstTool)
-        let vcBefore = stylePopover.contentViewController
-        let frameBefore = paletteContainer.frame
-        let before = stylePopover.positioningRect
-        if paletteColorButtons.indices.contains(2) {
-            selectColor(paletteColorButtons[2])
+        toolbarPanel.layoutSubtreeIfNeeded()
+        let frameBefore = toolbarPanel.frame
+        if inlineColorButtons.indices.contains(2) {
+            selectColor(inlineColorButtons[2])
         }
-        let vcAfter = stylePopover.contentViewController
-        let frameAfter = paletteContainer.frame
-        let after = stylePopover.positioningRect
-        // 根因断言：换色后 VC 与容器尺寸必须原样不动，位置才不会被重算。
-        let sameVC = vcBefore === vcAfter
-        let sameFrame = frameBefore == frameAfter
-        let dx = abs(before.minX - after.minX)
-        let dy = abs(before.minY - after.minY)
-        return "shown=\(stylePopover.isShown) sameVC=\(sameVC) sameFrame=\(sameFrame) "
-            + "posDelta=(\(Int(dx)),\(Int(dy))) stable=\(sameVC && sameFrame && dx < 0.5 && dy < 0.5)"
+        toolbarPanel.layoutSubtreeIfNeeded()
+        let frameAfter = toolbarPanel.frame
+        let dx = abs(frameBefore.minX - frameAfter.minX)
+        let dy = abs(frameBefore.minY - frameAfter.minY)
+        return "inline=true sameFrame=\(frameBefore == frameAfter) "
+            + "posDelta=(\(Int(dx)),\(Int(dy))) stable=\(frameBefore == frameAfter && dx < 0.5 && dy < 0.5)"
     }
 
     /// 自测：把工具栏视图离屏渲染成 PNG，用于无截屏环境下的视觉回归。
     func autotestDumpToolbar(to path: String) -> String {
         guard phase == .editing else { return "no-editor" }
-        toolbar.layoutSubtreeIfNeeded()
-        let size = toolbar.bounds.size
+        toolbarPanel.layoutSubtreeIfNeeded()
+        let size = toolbarPanel.bounds.size
         guard size.width > 1, size.height > 1 else { return "empty-toolbar" }
         let rect = NSRect(origin: .zero, size: size)
-        guard let rep = toolbar.bitmapImageRepForCachingDisplay(in: rect) else { return "no-rep" }
-        toolbar.cacheDisplay(in: rect, to: rep)
+        guard let rep = toolbarPanel.bitmapImageRepForCachingDisplay(in: rect) else { return "no-rep" }
+        toolbarPanel.cacheDisplay(in: rect, to: rep)
         guard let data = rep.representation(using: .png, properties: [:]) else { return "no-png" }
         try? data.write(to: URL(fileURLWithPath: path))
         return "toolbar=\(Int(size.width))x\(Int(size.height))"
     }
 
-    /// 自测：渲染样式面板（shape=圆点粗细 + 色板，text=字号下拉 + 色板）。
+    /// 自测：样式已内嵌工具栏，直接渲染整条工具栏作为视觉回归图。
     func autotestDumpPalette(text: Bool, to path: String) -> String {
         guard phase == .editing else { return "no-editor" }
         let previousTool = tool
@@ -1237,27 +1369,23 @@ final class CaptureEditView: NSView, NSTextFieldDelegate {
             tool = previousTool
             refreshToolbarState()
         }
-        ensurePalette()
-        syncPaletteState()
-        let fit = paletteFittingSize()
-        paletteContainer.frame = NSRect(origin: .zero, size: fit)
-        paletteContainer.layoutSubtreeIfNeeded()
-        let size = fit
-        guard size.width > 1, size.height > 1 else { return "empty-palette" }
+        toolbarPanel.layoutSubtreeIfNeeded()
+        let size = toolbarPanel.bounds.size
+        guard size.width > 1, size.height > 1 else { return "empty-toolbar" }
         let rect = NSRect(origin: .zero, size: size)
-        guard let rep = paletteContainer.bitmapImageRepForCachingDisplay(in: rect) else { return "no-rep" }
-        paletteContainer.cacheDisplay(in: rect, to: rep)
+        guard let rep = toolbarPanel.bitmapImageRepForCachingDisplay(in: rect) else { return "no-rep" }
+        toolbarPanel.cacheDisplay(in: rect, to: rep)
         guard let data = rep.representation(using: .png, properties: [:]) else { return "no-png" }
         try? data.write(to: URL(fileURLWithPath: path))
-        return "palette=\(Int(size.width))x\(Int(size.height))"
+        return "inline=\(Int(size.width))x\(Int(size.height))"
     }
 
     /// 自测：渲染「选区 + 标注 + 工具栏」整体区域，验证所见即所得。
     func autotestDumpEditorRegion(to path: String) -> String {
         guard phase == .editing, !selection.isEmpty else { return "no-editor" }
-        toolbar.layoutSubtreeIfNeeded()
+        toolbarPanel.layoutSubtreeIfNeeded()
         var region = selection.insetBy(dx: -50, dy: -50)
-        region.size.height += 130 + toolbar.bounds.height
+        region.size.height += 130 + toolbarPanel.bounds.height
         region = region.intersection(bounds)
         guard region.width > 1, region.height > 1 else { return "empty-region" }
         guard let rep = bitmapImageRepForCachingDisplay(in: region) else { return "no-rep" }
@@ -1342,11 +1470,11 @@ final class CaptureEditView: NSView, NSTextFieldDelegate {
     /// 用于和导出图做像素级比对，验证「所见」与「所得」是否一致。
     func dumpSelectionView(to path: String) -> String {
         guard !selection.isEmpty else { return "no-selection" }
-        let wasHidden = toolbar.isHidden
-        toolbar.isHidden = true
+        let wasHidden = toolbarPanel.isHidden
+        toolbarPanel.isHidden = true
         suppressChrome = true
         defer {
-            toolbar.isHidden = wasHidden
+            toolbarPanel.isHidden = wasHidden
             suppressChrome = false
         }
 
@@ -1436,6 +1564,17 @@ final class CaptureEditView: NSView, NSTextFieldDelegate {
 
     func copyForSelfTest() {
         copyImage(nil)
+    }
+
+    /// 自测工具栏 OCR 的识别与剪贴板写入链路，不依赖 UI 点击时序。
+    func autotestExtractText() -> String {
+        guard let cgImage = renderSelectionCGImage() else { return "no-image" }
+        let text = TextRecognitionService.recognizeText(in: cgImage)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.writeObjects([text as NSString])
+        let pasted = NSPasteboard.general.canReadObject(forClasses: [NSString.self], options: nil)
+        return "chars=\(text.count) clipboard=\(pasted)"
     }
 
     func pinForSelfTest() {

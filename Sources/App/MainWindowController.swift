@@ -46,7 +46,7 @@ private final class MainView: NSView {
 
         let title = NSTextField(labelWithString: "PinSnap")
         title.font = .systemFont(ofSize: 30, weight: .semibold)
-        let subtitle = NSTextField(wrappingLabelWithString: "截图、标注、复制、保存，并将重要内容固定在桌面之上。")
+        let subtitle = NSTextField(wrappingLabelWithString: "截图、标注、复制、保存，并将重要内容固定在桌面之上。\n截图历史会在本机保存最终图片，并自动识别图片文字，可在“截图历史与文字搜索”中按文字找图。")
         subtitle.textColor = .secondaryLabelColor
         permissionStatus.font = .systemFont(ofSize: 13)
         permissionStatus.maximumNumberOfLines = 2
@@ -74,7 +74,10 @@ private final class MainView: NSView {
         permissionButtons.orientation = .horizontal
         permissionButtons.spacing = 8
 
-        let stack = NSStackView(views: [title, subtitle, grid, separator(), shortcutTitle, shortcutInfo, permissionStatus, permissionButtons])
+        let historyHint = NSTextField(wrappingLabelWithString: "本地文字搜索入口：从菜单栏 PinSnap 图标或应用菜单打开“截图历史与文字搜索…”，在顶部“搜索截图中的文字”中检索；识别全程在本机完成。")
+        historyHint.textColor = .secondaryLabelColor
+        historyHint.font = .systemFont(ofSize: 12)
+        let stack = NSStackView(views: [title, subtitle, grid, separator(), shortcutTitle, shortcutInfo, historyHint, permissionStatus, permissionButtons])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 13

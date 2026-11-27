@@ -2,17 +2,55 @@ import Cocoa
 import UniformTypeIdentifiers
 
 final class PinController {
+    /// 防止多张高分辨率整屏截图常驻导致内存持续上涨。
+    /// 预算以原始位图的 BGRA 估算，给常见双 4K 工作流留出空间，同时保证可预期地淘汰最早 Pin。
+    private static let maximumPinnedWindows = 8
+    private static let maximumPinnedBytes = 256 * 1024 * 1024
+
     private var windows: [PinnedWindow] = []
+    private var estimatedPinnedBytes = 0
 
     var pinnedCount: Int { windows.count }
+    var estimatedMemoryBytes: Int { estimatedPinnedBytes }
 
-    func pin(_ image: NSImage, on screen: NSScreen? = nil) {
-        let window = PinnedWindow(image: image, screen: screen) { [weak self] closed in
-            self?.windows.removeAll { $0 === closed }
+    @discardableResult
+    func pin(_ image: NSImage, on screen: NSScreen? = nil) -> Int {
+        let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) ?? CGImageMini.placeholder
+        let bytes = Self.estimatedBytes(for: cgImage)
+        var evicted = 0
+        while let oldest = windows.first,
+              windows.count >= Self.maximumPinnedWindows || estimatedPinnedBytes + bytes > Self.maximumPinnedBytes {
+            evicted += 1
+            oldest.close()
+        }
+
+        let window = PinnedWindow(image: image, imageBytes: bytes, screen: screen) { [weak self] closed in
+            self?.remove(closed)
         }
         windows.append(window)
+        estimatedPinnedBytes += bytes
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+        return evicted
+    }
+
+    @discardableResult
+    func closeAll() -> Int {
+        let closing = windows
+        closing.forEach { $0.close() }
+        return closing.count
+    }
+
+    private func remove(_ window: PinnedWindow) {
+        guard let index = windows.firstIndex(where: { $0 === window }) else { return }
+        estimatedPinnedBytes = max(0, estimatedPinnedBytes - windows[index].estimatedImageBytes)
+        windows.remove(at: index)
+    }
+
+    private static func estimatedBytes(for image: CGImage) -> Int {
+        let raw = image.bytesPerRow * image.height
+        // 从异常或不完整图像得到 0 时按 BGRA 位图下限估算，避免绕开预算。
+        return max(raw, image.width * image.height * 4)
     }
 
     /// 自测用：最近一个 Pin 窗口的 frame，供测试挑选窗口内的锚点。
@@ -23,13 +61,23 @@ final class PinController {
         guard let window = windows.last else { return "no-window" }
         return window.autotestZoom(factor: factor, anchor: anchor)
     }
+
+    func autotestCloseAll() -> String {
+        let closed = closeAll()
+        return "closed=\(closed) remaining=\(pinnedCount) bytes=\(estimatedMemoryBytes)"
+    }
 }
 
 final class PinnedWindow: NSPanel {
+    fileprivate let estimatedImageBytes: Int
     private let closed: (PinnedWindow) -> Void
     private var didReportClose = false
 
-    init(image: NSImage, screen targetScreen: NSScreen?, closed: @escaping (PinnedWindow) -> Void) {
+    init(image: NSImage,
+         imageBytes: Int,
+         screen targetScreen: NSScreen?,
+         closed: @escaping (PinnedWindow) -> Void) {
+        self.estimatedImageBytes = imageBytes
         self.closed = closed
         let pointSize = image.size.width > 1 ? image.size : NSSize(width: 320, height: 240)
         let screen = (targetScreen ?? NSScreen.main)?.frame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
