@@ -360,6 +360,22 @@ final class CaptureCoordinator {
         editorWindow?.autotestExtractText() ?? "no-editor"
     }
 
+    func autotestDumpOCRWindow(to path: String) -> String {
+        editorWindow?.autotestDumpOCRWindow(to: path) ?? "no-editor"
+    }
+
+    func autotestOCRWindowCopy() -> String {
+        editorWindow?.autotestOCRWindowCopy() ?? "no-editor"
+    }
+
+    func autotestShowEmptyOCRResult() -> String {
+        editorWindow?.autotestShowEmptyOCRResult() ?? "no-editor"
+    }
+
+    func autotestCloseOCRWindow() -> String {
+        editorWindow?.autotestCloseOCRWindow() ?? "no-editor"
+    }
+
     func autotestHistoryOCR() -> String {
         guard let historyStore, let image = editorWindow?.exportedImage() else { return "no-editor-or-history" }
         let text = historyStore.selfTestRecognize(image)

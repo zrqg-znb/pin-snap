@@ -15,12 +15,14 @@ final class ScreenshotHistoryStore {
         let byteCount: Int
         var ocrText: String
         var ocrIndexed: Bool
+        /// 产出这段文字时使用的识别参数版本。低于当前版本会在启动时重认。
+        var ocrVersion: Int
 
         private enum CodingKeys: String, CodingKey {
-            case id, filename, createdAt, pixelWidth, pixelHeight, byteCount, ocrText, ocrIndexed
+            case id, filename, createdAt, pixelWidth, pixelHeight, byteCount, ocrText, ocrIndexed, ocrVersion
         }
 
-        init(id: UUID, filename: String, createdAt: Date, pixelWidth: Int, pixelHeight: Int, byteCount: Int, ocrText: String = "", ocrIndexed: Bool = false) {
+        init(id: UUID, filename: String, createdAt: Date, pixelWidth: Int, pixelHeight: Int, byteCount: Int, ocrText: String = "", ocrIndexed: Bool = false, ocrVersion: Int = 0) {
             self.id = id
             self.filename = filename
             self.createdAt = createdAt
@@ -29,6 +31,7 @@ final class ScreenshotHistoryStore {
             self.byteCount = byteCount
             self.ocrText = ocrText
             self.ocrIndexed = ocrIndexed
+            self.ocrVersion = ocrVersion
         }
 
         init(from decoder: Decoder) throws {
@@ -42,12 +45,17 @@ final class ScreenshotHistoryStore {
             // 兼容 1.2.0 OCR 上线前已有的 index.json。
             ocrText = try values.decodeIfPresent(String.self, forKey: .ocrText) ?? ""
             ocrIndexed = try values.decodeIfPresent(Bool.self, forKey: .ocrIndexed) ?? false
+            ocrVersion = try values.decodeIfPresent(Int.self, forKey: .ocrVersion) ?? 0
         }
 
         var fileURL: URL { ScreenshotHistoryStore.historyDirectory.appendingPathComponent(filename) }
     }
 
     static let shared = ScreenshotHistoryStore()
+
+    /// 识别参数改动会改变结果质量时 +1：启动时把旧索引降级为“待识别”并后台重跑。
+    /// 2 = 从 .fast（只认拉丁）改为 .accurate + 中文语言模型。
+    static let ocrIndexVersion = 2
 
     static let maximumItemCount = 120
     static let maximumBytes = 512 * 1024 * 1024
@@ -78,6 +86,10 @@ final class ScreenshotHistoryStore {
         queue.sync {
             ensureDirectory()
             items = loadIndex()
+            // 旧索引被降级后立刻落盘：即使这次 OCR 没跑完，界面上也不会再显示乱码文本。
+            if items.contains(where: { $0.ocrVersion < Self.ocrIndexVersion }) {
+                writeIndexLocked()
+            }
             pruneLocked(retentionDays: Self.defaultRetentionDays)
             scheduleOCRForUnindexedItemsLocked()
         }
@@ -207,6 +219,7 @@ final class ScreenshotHistoryStore {
             guard let index = self.items.firstIndex(where: { $0.id == itemID }) else { return }
             self.items[index].ocrText = text
             self.items[index].ocrIndexed = true
+            self.items[index].ocrVersion = Self.ocrIndexVersion
             self.writeIndexLocked()
             DispatchQueue.main.async {
                 NotificationCenter.default.post(name: .pinSnapHistoryOCRDidUpdate, object: self, userInfo: ["itemID": itemID])
@@ -245,7 +258,14 @@ final class ScreenshotHistoryStore {
         }
         return index.items.filter { item in
             fileManager.fileExists(atPath: item.fileURL.path)
-        }.sorted { $0.createdAt > $1.createdAt }
+        }.sorted { $0.createdAt > $1.createdAt }.map { item in
+            guard item.ocrVersion < Self.ocrIndexVersion else { return item }
+            var rebuilt = item
+            // 旧版本是 .fast 识别出来的拉丁乱码，留着只会污染搜索；清空后交给后台重认。
+            rebuilt.ocrText = ""
+            rebuilt.ocrIndexed = false
+            return rebuilt
+        }
     }
 
     private func writeIndexLocked() {

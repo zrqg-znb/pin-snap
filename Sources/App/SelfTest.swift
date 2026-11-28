@@ -1,4 +1,6 @@
 import Cocoa
+import CoreText
+import Vision
 
 enum SelfTest {
     static var isEnabled: Bool {
@@ -7,6 +9,15 @@ enum SelfTest {
 
     static func run(coordinator: CaptureCoordinator, service: ScreenCaptureService) {
         guard isEnabled else { return }
+        // 中文识别率自证：生成一张中文测试卡，跑真实 OCR，按命中条数打分。
+        // 不依赖屏幕内容，换机器也能得到同一个基准。
+        if ProcessInfo.processInfo.environment["PINSNAP_AUTOTEST_OCRACCURACY"] == "1" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                NSLog("PinSnap ocr accuracy: \(ocrAccuracyProbe())")
+                NSApp.terminate(nil)
+            }
+            return
+        }
         // 抓图耗时基准：BENCH=1 直接截图（冷启动），BENCH=2 先预热再截图。
         // 两者对比的就是「预热到底省了多少」这个数，不靠猜。
         if let bench = ProcessInfo.processInfo.environment["PINSNAP_AUTOTEST_BENCH"] {
@@ -176,6 +187,37 @@ enum SelfTest {
             }
             return
         }
+        if ProcessInfo.processInfo.environment["PINSNAP_AUTOTEST_OCREMPTY"] == "1" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.6) {
+                coordinator.autotestSeedAnnotations()
+                NSLog("PinSnap ocr empty open: \(coordinator.autotestShowEmptyOCRResult())")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                    NSLog("PinSnap ocr empty dump: \(coordinator.autotestDumpOCRWindow(to: "/tmp/pinsnap-ocr-empty.png"))")
+                    NSLog("PinSnap ocr empty copy: \(coordinator.autotestOCRWindowCopy())")
+                    NSLog("PinSnap ocr empty close: \(coordinator.autotestCloseOCRWindow())")
+                    NSApp.terminate(nil)
+                }
+            }
+            return
+        }
+        if ProcessInfo.processInfo.environment["PINSNAP_AUTOTEST_OCRWINDOW"] == "1" {
+            // 真实路径：点 OCR → 识别 → 开结果窗 → 落盘窗口截图 → 关窗回到编辑器。
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.6) {
+                coordinator.autotestSeedAnnotations()
+                NSLog("PinSnap ocr window open: \(coordinator.autotestToolbarOCR())")
+                // 识别是同步的会占住主线程，后续检查必须相对“开窗完成”再排，
+                // 否则窗口还没被窗口服务器提交就取样，会误判成没上屏。
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                    NSLog("PinSnap ocr window dump: \(coordinator.autotestDumpOCRWindow(to: "/tmp/pinsnap-ocr-window.png"))")
+                    NSLog("PinSnap ocr window copy: \(coordinator.autotestOCRWindowCopy())")
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                        NSLog("PinSnap ocr window close: \(coordinator.autotestCloseOCRWindow())")
+                        NSApp.terminate(nil)
+                    }
+                }
+            }
+            return
+        }
         if ProcessInfo.processInfo.environment["PINSNAP_AUTOTEST_OCR"] == "1" {
             DispatchQueue.main.asyncAfter(deadline: .now() + 4.5) {
                 NSLog("PinSnap self-test toolbar OCR: \(coordinator.autotestToolbarOCR())")
@@ -215,5 +257,59 @@ enum SelfTest {
             NSLog("PinSnap self-test done, editorPresent=\(coordinator.hasEditor)")
             NSApp.terminate(nil)
         }
+    }
+
+    // MARK: - 中文识别率基准
+
+    /// 跑一张固定的中文测试卡，返回命中条数、中文字符数和耗时。
+    private static func ocrAccuracyProbe() -> String {
+        guard let image = chineseTestCard() else { return "card-failed" }
+        let started = CACurrentMediaTime()
+        let text = TextRecognitionService.recognizeText(in: image)
+        let elapsed = Int((CACurrentMediaTime() - started) * 1000)
+
+        let expected = ["截图文字识别测试", "今天下午三点开会", "请准时参加", "中文识别", "文件保存失败"]
+        let hits = expected.filter { text.contains($0) }
+        let cjk = text.unicodeScalars.filter { (0x4E00...0x9FFF).contains($0.value) }.count
+        let flat = text.replacingOccurrences(of: "\n", with: " / ")
+        let revisions = VNRecognizeTextRequest.supportedRevisions.sorted().map(String.init).joined(separator: ",")
+        return "hits=\(hits.count)/\(expected.count) cjk=\(cjk) chars=\(text.count) ms=\(elapsed) "
+            + "revs=\(revisions) text=\(flat)"
+    }
+
+    /// 白底中文测试卡：四行字，字号从 40 到 18，覆盖标题、正文和提示语。
+    private static func chineseTestCard() -> CGImage? {
+        let width = 1040
+        let height = 460
+        guard let context = CGContext(data: nil,
+                                      width: width,
+                                      height: height,
+                                      bitsPerComponent: 8,
+                                      bytesPerRow: 0,
+                                      space: CGColorSpaceCreateDeviceRGB(),
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
+            return nil
+        }
+        context.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+
+        let lines: [(text: String, size: CGFloat, y: CGFloat)] = [
+            ("截图文字识别测试", 40, 360),
+            ("今天下午三点开会，请准时参加。", 30, 280),
+            ("PinSnap OCR 中文识别 2026", 28, 210),
+            ("错误提示：文件保存失败，请重试。", 18, 140)
+        ]
+        for line in lines {
+            let font = CTFontCreateWithName("PingFang SC" as CFString, line.size, nil)
+            let attributes: [NSAttributedString.Key: Any] = [
+                .font: font,
+                .foregroundColor: CGColor(red: 0.08, green: 0.08, blue: 0.09, alpha: 1)
+            ]
+            let attributed = NSAttributedString(string: line.text, attributes: attributes)
+            let ctLine = CTLineCreateWithAttributedString(attributed)
+            context.textPosition = CGPoint(x: 40, y: line.y)
+            CTLineDraw(ctLine, context)
+        }
+        return context.makeImage()
     }
 }

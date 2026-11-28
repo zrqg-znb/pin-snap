@@ -130,6 +130,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         quitItem.target = self
         appItem.submenu = appMenu
         mainMenu.addItem(appItem)
+
+        // AppKit 的 ⌘C / ⌘A 是通过菜单分发的：没有“编辑”菜单，
+        // OCR 结果窗里的文本即使可选也按不出快捷键。
+        let editItem = NSMenuItem()
+        let editMenu = NSMenu(title: "编辑")
+        editMenu.addItem(withTitle: "拷贝", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        editMenu.addItem(withTitle: "全选", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        editItem.submenu = editMenu
+        mainMenu.addItem(editItem)
+
         NSApp.mainMenu = mainMenu
     }
 }

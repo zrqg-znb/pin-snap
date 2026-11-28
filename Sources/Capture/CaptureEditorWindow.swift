@@ -66,6 +66,14 @@ final class CaptureEditorWindow: NSWindow {
 
     func autotestExtractText() -> String { editor.autotestExtractText() }
 
+    func autotestDumpOCRWindow(to path: String) -> String { editor.autotestDumpOCRWindow(to: path) }
+
+    func autotestOCRWindowCopy() -> String { editor.autotestOCRWindowCopy() }
+
+    func autotestShowEmptyOCRResult() -> String { editor.autotestShowEmptyOCRResult() }
+
+    func autotestCloseOCRWindow() -> String { editor.autotestCloseOCRWindow() }
+
     func autotestPin() -> String {
         editor.pinForSelfTest()
         return "pin-ok"
@@ -93,6 +101,7 @@ final class CaptureEditorWindow: NSWindow {
     func dumpViewBitmap(to path: String) -> String { return editor.dumpSelectionView(to: path) }
 
     func closeSilently() {
+        editor.closeOCRResultWindow()
         editor.detachTextInput()
         orderOut(nil)
         close()
@@ -101,6 +110,7 @@ final class CaptureEditorWindow: NSWindow {
     private func finish() {
         // 保活到方法结束：onClose() 会清掉协调器对窗口的强引用。
         let strongSelf = self
+        strongSelf.editor.closeOCRResultWindow()
         strongSelf.editor.detachTextInput()
         strongSelf.orderOut(nil)
         strongSelf.onClose()
@@ -413,6 +423,7 @@ final class CaptureEditView: NSView, NSTextFieldDelegate {
     private var isCompletingOutput = false
     /// OCR 是异步的，识别中禁止重复点击，避免多次写剪贴板。
     private var isExtractingText = false
+    private var ocrResultWindow: OCRResultWindowController?
     private var notice: String?
     /// 底图还没回来时窗口保持全透明：让用户直接看到当前桌面，
     /// 而不是一块「铺了深色底 + 遮罩、但底下什么都没有」的黑屏。
@@ -749,8 +760,7 @@ final class CaptureEditView: NSView, NSTextFieldDelegate {
         needsDisplay = true
     }
 
-    /// 工具栏 OCR：直接对当前选区的最终图做本机识别，并把文字复制到剪贴板。
-    /// 不会结束截图会话，用户仍可继续标注；历史里的 OCR 索引仍独立保留。
+    /// 工具栏 OCR：识别当前选区并打开结果窗口，不自动改写剪贴板。
     @objc private func extractText(_ sender: Any?) {
         guard !isExtractingText, let cgImage = renderSelectionCGImage() else { return }
         isExtractingText = true
@@ -762,15 +772,36 @@ final class CaptureEditView: NSView, NSTextFieldDelegate {
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 self.isExtractingText = false
-                guard !text.isEmpty else {
-                    self.showNotice("未识别到文字")
-                    return
-                }
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.writeObjects([text as NSString])
-                self.showNotice("已提取文字并复制（\(text.count) 字）")
+                // 没识别到文字也要开窗：窗口里能明确告诉用户“识别完了，只是没有文字”，
+                // 而不是丢一个 1.4 秒就消失的浮层，让人以为程序卡死。
+                self.presentOCRResult(image: cgImage, text: text)
             }
         }
+    }
+
+    /// 打开本机 OCR 结果窗口。
+    /// 编辑器是 `.screenSaver` 层级的全屏遮罩：先把它临时降到普通层级，
+    /// 结果窗才能作为标准浮动窗口真正上屏；关窗时再恢复原层级。
+    private func presentOCRResult(image: CGImage, text: String) {
+        guard let editorWindow = window else { return }
+        ocrResultWindow?.close()
+
+        let controller = OCRResultWindowController(
+            image: NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height)),
+            text: text
+        )
+        let editorLevel = editorWindow.level
+        editorWindow.level = .normal
+        controller.onClose = { [weak self, weak controller] in
+            guard let self, self.ocrResultWindow === controller else { return }
+            self.ocrResultWindow = nil
+            self.window?.level = editorLevel
+            // 回到截图编辑态，保留已有选区、标注和样式。
+            self.window?.makeKeyAndOrderFront(nil)
+            self.window?.makeFirstResponder(self)
+        }
+        ocrResultWindow = controller
+        controller.showAndActivate()
     }
 
     private func positionToolbar() {
@@ -1291,6 +1322,14 @@ final class CaptureEditView: NSView, NSTextFieldDelegate {
         pendingTextStyle = nil
     }
 
+    /// 编辑器整体关闭（新截图顶替、取消、完成）时，结果窗不能留在屏幕上。
+    /// 先断开引用再 close，让 onClose 里的“恢复编辑器”逻辑自动跳过。
+    func closeOCRResultWindow() {
+        guard let controller = ocrResultWindow else { return }
+        ocrResultWindow = nil
+        controller.close()
+    }
+
     /// 自测：模拟一次完整拖拽（按下→拖动→松开），验证遮罩一出现就能画框。
     func autotestSimulateDrag(from start: NSPoint = NSPoint(x: 300, y: 300),
                               to end: NSPoint = NSPoint(x: 800, y: 700)) -> String {
@@ -1566,15 +1605,57 @@ final class CaptureEditView: NSView, NSTextFieldDelegate {
         copyImage(nil)
     }
 
-    /// 自测工具栏 OCR 的识别与剪贴板写入链路，不依赖 UI 点击时序。
+    /// 自测 OCR：走真实的“点击 → 识别 → 开窗”路径，不触碰剪贴板。
+    /// 不再返回写死的成功字符串——窗口没出现就必须暴露出来。
     func autotestExtractText() -> String {
         guard let cgImage = renderSelectionCGImage() else { return "no-image" }
+        let pasteboardBefore = NSPasteboard.general.changeCount
+        let started = CACurrentMediaTime()
         let text = TextRecognitionService.recognizeText(in: cgImage)
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.writeObjects([text as NSString])
-        let pasted = NSPasteboard.general.canReadObject(forClasses: [NSString.self], options: nil)
-        return "chars=\(text.count) clipboard=\(pasted)"
+        let elapsed = Int((CACurrentMediaTime() - started) * 1000)
+        presentOCRResult(image: cgImage, text: text)
+        guard let ocrWindow = ocrResultWindow?.window else {
+            return "chars=\(text.count) window=missing"
+        }
+        let aboveEditor = ocrWindow.level.rawValue > (window?.level.rawValue ?? 0)
+        let pasteboardUntouched = NSPasteboard.general.changeCount == pasteboardBefore
+        let cjk = text.unicodeScalars.filter { (0x4E00...0x9FFF).contains($0.value) }.count
+        // 真实截图里的中文也必须认出来，否则又回到“全英文乱码”的老问题。
+        let preview = String(text.prefix(24)).replacingOccurrences(of: "\n", with: " / ")
+        return "chars=\(text.count) cjk=\(cjk) ms=\(elapsed) window=true visible=\(ocrWindow.isVisible) "
+            + "key=\(ocrWindow.isKeyWindow) level=\(ocrWindow.level.rawValue) "
+            + "editorLevel=\(window?.level.rawValue ?? -1) "
+            + "aboveEditor=\(aboveEditor) clipboardUntouched=\(pasteboardUntouched) "
+            + "preview=\(preview)"
+    }
+
+    func autotestDumpOCRWindow(to path: String) -> String {
+        guard let controller = ocrResultWindow else { return "no-window" }
+        return controller.autotestDump(to: path, editorWindow: window)
+    }
+
+    func autotestOCRWindowCopy() -> String {
+        ocrResultWindow?.autotestCopyChecks() ?? "no-window"
+    }
+
+    /// 自测“识别不到文字”的结果窗：不能只弹一个会消失的提示。
+    func autotestShowEmptyOCRResult() -> String {
+        guard let cgImage = renderSelectionCGImage() else { return "no-image" }
+        presentOCRResult(image: cgImage, text: "")
+        guard let ocrWindow = ocrResultWindow?.window else { return "window=missing" }
+        return "visible=\(ocrWindow.isVisible) key=\(ocrWindow.isKeyWindow) empty=true"
+    }
+
+    /// 关闭结果窗后，截图编辑器必须恢复原层级并重新拿到焦点，
+    /// 否则后面的标注、保存、Pin 全会落在错误的窗口状态上。
+    func autotestCloseOCRWindow() -> String {
+        guard let controller = ocrResultWindow else { return "no-window" }
+        controller.close()
+        let editorKey = window?.isKeyWindow ?? false
+        let levelRestored = window?.level == .screenSaver
+        return "closed=true released=\(ocrResultWindow == nil) "
+            + "editorPresent=\(window?.isVisible ?? false) editorKey=\(editorKey) levelRestored=\(levelRestored)"
     }
 
     func pinForSelfTest() {
